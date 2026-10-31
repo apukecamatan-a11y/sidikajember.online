@@ -1201,8 +1201,14 @@ function fmtDate(d) {
   return `${day}/${m}/${d.getFullYear()}`;
 }
 function addMonths(d, n) {
+  // Tambah n bulan kalender. Bila tanggal asal tidak ada di bulan tujuan (mis. 31 Agt + 6 bln = "31 Feb"),
+  // dipakai hari terakhir bulan tujuan (28/29 Feb), bukan meluap ke bulan berikutnya (3 Mar) seperti setMonth biasa.
   const r = new Date(d);
+  const day = r.getDate();
+  r.setDate(1);
   r.setMonth(r.getMonth() + n);
+  const lastDay = new Date(r.getFullYear(), r.getMonth() + 1, 0).getDate();
+  r.setDate(Math.min(day, lastDay));
   return r;
 }
 function addDays(d, n) {
@@ -1254,6 +1260,31 @@ const KEJAR_RUTIN_LANJUTAN_LIMIT_MONTHS = 24;  // rutin lanjutan: usia 12–23 b
 const ZERO_DOSE_MIN_MONTHS = 12;
 const RV_KEYS = ["rv1", "rv2", "rv3"];
 
+/* ---------- METADATA ZERO DOSE ----------
+   Zero Dose : bayi usia >= 12 bulan yang belum mendapat imunisasi DPT 1.
+   Sasaran Zero Dose dapat dikejar hingga usia 59 bulan, khusus antigen: DPT, Polio, MR, PCV
+   (menggantikan kunci usia 2 tahun untuk antigen-antigen tersebut).
+   KUNCI: pemberian DPT/Polio/MR/PCV melebihi usia 59 bulan 5 hari => TERKUNCI (kolom tanggal tidak bisa diisi,
+   dan tanggal pemberian tidak boleh melewati batas tsb). Berlaku untuk semua sasaran.
+   Sasaran tetap dianggap "eligible kejar Zero Dose" bila DPT 1 baru diberikan pada usia >= 12 bulan,
+   agar dosis lanjutannya (DPT 2, dst.) masih bisa dikejar sampai batas yang sama.                        */
+const ZERO_DOSE_CATCHUP_PREFIXES = ["dpt", "polio", "mr", "pcv"];
+const ZERO_DOSE_CATCHUP_MONTHS = 59;
+const ZERO_DOSE_CATCHUP_EXTRA_DAYS = 5;
+function isZeroDoseCatchupKey(key) {
+  return ZERO_DOSE_CATCHUP_PREFIXES.some((p) => key.startsWith(p) && /^\d+$/.test(key.slice(p.length)));
+}
+/* Tanggal terakhir pemberian antigen kejar Zero Dose = usia 59 bulan 5 hari. Lewat dari tanggal ini => terkunci. */
+function zeroDoseCatchupLimit(birth) {
+  return birth ? addDays(addMonths(birth, ZERO_DOSE_CATCHUP_MONTHS), ZERO_DOSE_CATCHUP_EXTRA_DAYS) : null;
+}
+/* Sasaran Zero Dose (belum DPT 1, usia >= 12 bln) atau DPT 1 baru diberikan pada usia >= 12 bln. */
+function isZeroDoseCatchupEligible(birth, dpt1Given, today) {
+  if (!birth) return false;
+  if (dpt1Given) return dpt1Given >= addMonths(birth, ZERO_DOSE_MIN_MONTHS);
+  return today >= addMonths(birth, ZERO_DOSE_MIN_MONTHS);
+}
+
 const KEJAR_META = {
   rutin: { label: "Kejar Rutin", color: "#C07A2C", bg: "#FDEEDC" },
   murni: { label: "Kejar Murni", color: "#B5332A", bg: "#FCE0DE" },
@@ -1270,7 +1301,7 @@ function isZeroDose(birth, dpt1Given, today) {
 
 /* Mengembalikan null jika tidak ada peringatan yang perlu ditampilkan, atau
    { locked, category, label } jika sasaran belum diimunisasi & sudah terlambat. */
-function computeKejarInfo(key, birth, given, today, itemStatus) {
+function computeKejarInfo(key, birth, given, today, itemStatus, dpt1Given) {
   if (!birth || given) return null;
 
   // Semua antigen (termasuk HB-0 & Rotavirus) hanya diberi peringatan kejar bila sudah jatuh tempo/terlambat;
@@ -1280,6 +1311,16 @@ function computeKejarInfo(key, birth, given, today, itemStatus) {
   const sched = SCHEDULE.find((x) => x.key === key);
   if (!sched) return null;
   const murniLimit = addMonths(birth, KEJAR_LOCK_MONTHS);
+
+  // DPT / Polio / MR / PCV: batas kejar Zero Dose = usia 59 bulan 5 hari (menggantikan kunci usia 2 tahun)
+  if (isZeroDoseCatchupKey(key)) {
+    if (today > zeroDoseCatchupLimit(birth)) {
+      return { locked: true, category: "terkunci", label: "Terkunci — melebihi usia 59 bulan 5 hari" };
+    }
+    if (today >= murniLimit && isZeroDoseCatchupEligible(birth, dpt1Given, today)) {
+      return { locked: false, category: "zerodose", label: "Kejar Zero Dose — dapat diimunisasi hingga usia 59 bulan 5 hari" };
+    }
+  }
 
   if (sched.group === "lanjutan") {
     if (today >= murniLimit) {
@@ -1335,13 +1376,88 @@ function computeKejarDoneInfo(key, birth, given, due) {
   };
 }
 
+/* ---------- METADATA INTERVAL PEMBERIAN DOSIS (sesuai tabel "Definisi Interval") ----------
+   Interval dihitung dari TANGGAL PEMBERIAN dosis sebelumnya (bukan dari jadwal usia).
+   Bila jarak belum terpenuhi, kolom tanggal dosis lanjutan DIKUNCI SEMENTARA sampai tanggal paling awal tercapai.
+     prev      : antigen/dosis sebelumnya yang menjadi acuan
+     days      : interval minimum (hari)            | months : interval minimum (bulan kalender)
+     startKey  : dosis-1 antigen tsb. Bila dosis-1 diberikan pada usia > 12 bulan, berlaku aturan "late*":
+     lateDays / lateMonths : interval pengganti untuk dosis yang dimulai terlambat
+     lateNA    : dosis tidak diberikan bila dosis-1 baru diberikan pada usia > 12 bulan
+     naFromMonths : dosis tidak diberikan bila dosis-1 baru diberikan pada usia >= N bulan
+   Tanpa aturan interval: HB-0, BCG, dosis-1 tiap antigen, MR 1.
+   - Polio (OPV) 1→2→3→4 : 28 hari
+   - DPT-HB-Hib 1→2 : 28 hari | 2→3 : 28 hari (dosis-1 > 12 bln: 6 bulan) | 3→4 (booster) : 1 tahun
+   - PCV 1→2 : 28 hari (dosis-1 > 12 bln: 8 minggu) | 2→3 (booster) : 8 minggu (dosis-1 > 12 bln: dosis-3 tidak diberikan;
+     dosis-1 pada usia >= 24 bln: hanya 1 dosis, dosis 2 & 3 tidak diberikan)
+   - Rotavirus 1→2→3 : 28 hari | IPV 1→2 : 4 bulan | MR 1→2 : 6 bulan                                       */
+const INTERVAL_META = {
+  polio2: { prev: "polio1", days: 28 },
+  polio3: { prev: "polio2", days: 28 },
+  polio4: { prev: "polio3", days: 28 },
+  dpt2: { prev: "dpt1", days: 28 },
+  dpt3: { prev: "dpt2", days: 28, startKey: "dpt1", lateMonths: 6 },
+  dpt4: { prev: "dpt3", months: 12 },
+  pcv2: { prev: "pcv1", days: 28, startKey: "pcv1", lateDays: 56, naFromMonths: 24 },
+  pcv3: { prev: "pcv2", days: 56, startKey: "pcv1", lateNA: true, naFromMonths: 24 },
+  rv2: { prev: "rv1", days: 28 },
+  rv3: { prev: "rv2", days: 28 },
+  ipv2: { prev: "ipv1", months: 4 },
+  mr2: { prev: "mr1", months: 6 },
+};
+
+function intervalText(days, months) {
+  if (months) return months === 12 ? "1 tahun" : `${months} bulan`;
+  if (days && days % 7 === 0 && days >= 56) return `${days / 7} minggu`;
+  return `${days} hari`;
+}
+
+/* givenOf(k) => Date|null (tanggal dosis antigen k). Mengembalikan null bila antigen tanpa aturan interval
+   atau dosis acuan belum tercatat (tidak ada dasar penghitungan => tidak dikunci).
+   Hasil: { locked, na, violation, earliest, prevKey, label, text } */
+function computeIntervalInfo(key, birth, givenOf, today) {
+  const m = INTERVAL_META[key];
+  if (!m || !birth) return null;
+  const sched = SCHEDULE.find((x) => x.key === key);
+  const own = givenOf(key);
+  const startGiven = m.startKey ? givenOf(m.startKey) : null;
+  const late = !!(startGiven && startGiven > addMonths(birth, 12));
+  const noDose = !!(startGiven && ((late && m.lateNA) || (m.naFromMonths && startGiven >= addMonths(birth, m.naFromMonths))));
+  if (noDose) {
+    const why = m.naFromMonths && startGiven >= addMonths(birth, m.naFromMonths)
+      ? "dosis 1 baru diberikan pada usia ≥ 24 bulan, sasaran hanya mendapat 1 dosis"
+      : "dosis 1 baru diberikan pada usia > 12 bulan, sasaran hanya mendapat 2 dosis";
+    return { locked: true, na: true, violation: !!own, earliest: null, prevKey: m.prev, text: "", label: `Tidak diberikan — ${why}` };
+  }
+  const prevGiven = givenOf(m.prev);
+  if (!prevGiven) return null;
+  let days = m.days, months = m.months;
+  if (late && m.lateDays) { days = m.lateDays; months = undefined; }
+  if (late && m.lateMonths) { months = m.lateMonths; days = undefined; }
+  const earliest = months ? addMonths(prevGiven, months) : addDays(prevGiven, days);
+  const prevSched = SCHEDULE.find((x) => x.key === m.prev);
+  const text = intervalText(days, months);
+  const base = `interval ${text} dari ${prevSched ? prevSched.label : m.prev} (${fmtDate(prevGiven)})`;
+  const locked = today < earliest;
+  const violation = !!(own && own < earliest);
+  const label = violation
+    ? `Jarak pemberian kurang dari ${base}; paling cepat ${fmtDate(earliest)}`
+    : locked ? `Terkunci sementara — ${sched ? sched.label : key} baru bisa diisi mulai ${fmtDate(earliest)} (${base})`
+    : `Interval terpenuhi — ${base}`;
+  return { locked, na: false, violation, earliest, prevKey: m.prev, text, label };
+}
+
 function recordStatuses(rec, today) {
   const birth = parseCompact(rec.tgl_lahir);
   const out = {};
+  const givenOf = (k) => parseCompact(rec[k]);
   SCHEDULE.forEach((s) => {
     const item = computeItemStatus(birth, parseCompact(rec[s.key]), s, today);
-    item.kejar = computeKejarInfo(s.key, birth, item.given, today, item.status);
+    item.kejar = computeKejarInfo(s.key, birth, item.given, today, item.status, parseCompact(rec.dpt1));
     item.kejarDone = computeKejarDoneInfo(s.key, birth, item.given, item.due);
+    item.interval = computeIntervalInfo(s.key, birth, givenOf, today);
+    // Dosis yang memang tidak diberikan (mis. PCV 3 pada sasaran yang mulai PCV > 12 bulan) tidak perlu dikejar.
+    if (item.interval && item.interval.na && !item.given) item.kejar = null;
     out[s.key] = item;
   });
   return out;
@@ -2838,6 +2954,23 @@ function KejarBadge({ info }) {
   );
 }
 
+/* Badge interval antar dosis: kunci sementara (belum cukup jarak), dosis tidak diberikan, atau pelanggaran interval. */
+function IntervalBadge({ info, given }) {
+  if (!info) return null;
+  if (info.violation) {
+    const txt = info.na ? "⚠ Dosis ini seharusnya tidak diberikan" : `⚠ Jarak interval kurang${info.earliest ? ` · min. ${fmtDate(info.earliest)}` : ""}`;
+    return <span className="badge kejar-badge" style={{ color: "#B5332A", background: "#FCE0DE" }} title={info.label}>{txt}</span>;
+  }
+  if (given) return null;
+  if (info.na) {
+    return <span className="badge kejar-badge kejar-terkunci" style={{ color: KEJAR_META.terkunci.color, background: KEJAR_META.terkunci.bg }} title={info.label}>🔒 Tidak diberikan</span>;
+  }
+  if (info.locked) {
+    return <span className="badge kejar-badge kejar-terkunci" style={{ color: KEJAR_META.terkunci.color, background: KEJAR_META.terkunci.bg }} title={info.label}>🔒 Terkunci sementara · buka {fmtDate(info.earliest)}</span>;
+  }
+  return null;
+}
+
 /* Badge kejar yang SUDAH diberikan: tetap tampil setelah tanggal imunisasi diisi (kontur + tanda centang),
    supaya berbeda dari peringatan "⚠ Kejar …" yang masih harus dikejar dan dari imunisasi tepat waktu (tanpa badge). */
 function KejarDoneBadge({ info, showDays }) {
@@ -3401,7 +3534,9 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
     });
   }, [records, basisRecords, posyFilter, search]);
 
-  const unduhScope = isOperator ? basisRecords.filter((r) => operatorPosyOptions.includes(String(r.posy))) : basisRecords;
+  // Akun Operator hanya boleh melihat sasaran pada Posyandu yang ditugaskan di SEMUA menu (Manual Book Bab 12).
+  const scopeOperator = (list) => (isOperator ? list.filter((r) => operatorPosyOptions.includes(String(r.posy))) : list);
+  const unduhScope = scopeOperator(basisRecords);
   const dropoutScope = isOperator ? dropoutRecords.filter((r) => operatorPosyOptions.includes(String(r.posy))) : dropoutRecords;
 
   /* ---- Mutasi antar Puskesmas: kotak masuk (untuk disetujui/ditolak) & kotak keluar (status pengajuan sendiri) ---- */
@@ -3780,7 +3915,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
         )}
         {view === "reminders" && (
           <RemindersView
-            records={activeRecords}
+            records={scopeOperator(activeRecords)}
             today={today}
             pkm={pkm}
             onOpen={(id) => {
@@ -3795,14 +3930,14 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
         )}
         {view === "unduh-laporan" && <LaporanUnduhView records={unduhScope} today={today} pkmLabel={pkm} />}
         {view === "helpdesk" && <HelpdeskPkmView hd={hd} />}
-        {view === "kejar-rutin" && <KejarReport kategori="rutin" records={activeRecords} today={today} pkmLabel={pkm} />}
-        {view === "kejar-murni" && <KejarReport kategori="murni" records={activeRecords} today={today} pkmLabel={pkm} />}
-        {view === "report" && <ReportView records={basisRecords} posyList={posyList} desaList={desaList} today={today} pkm={pkm} />}
+        {view === "kejar-rutin" && <KejarReport kategori="rutin" records={scopeOperator(activeRecords)} today={today} pkmLabel={pkm} />}
+        {view === "kejar-murni" && <KejarReport kategori="murni" records={scopeOperator(activeRecords)} today={today} pkmLabel={pkm} />}
+        {view === "report" && <ReportView records={scopeOperator(basisRecords)} posyList={isOperator ? posyList.filter((p) => operatorPosyOptions.includes(String(p))) : posyList} desaList={desaList} today={today} pkm={pkm} />}
         {view === "wus-list" && (
-          <GenericSasaranListView catDef={CATEGORY_DEFS.wus} records={wusRecords || []} pkm={pkm} onSave={wusHandlers.onSave} onDelete={wusHandlers.onDelete} />
+          <GenericSasaranListView catDef={CATEGORY_DEFS.wus} records={wusRecords || []} pkm={pkm} onSave={wusHandlers.onSave} onDelete={wusHandlers.onDelete} operatorLock={isOperator ? { active: true, posy: assignedPosy, desa: assignedDesa, posyOptions: operatorPosyOptions } : { active: false }} />
         )}
         {view === "bumil-list" && (
-          <GenericSasaranListView catDef={CATEGORY_DEFS.bumil} records={bumilRecords || []} pkm={pkm} onSave={bumilHandlers.onSave} onDelete={bumilHandlers.onDelete} />
+          <GenericSasaranListView catDef={CATEGORY_DEFS.bumil} records={bumilRecords || []} pkm={pkm} onSave={bumilHandlers.onSave} onDelete={bumilHandlers.onDelete} operatorLock={isOperator ? { active: true, posy: assignedPosy, desa: assignedDesa, posyOptions: operatorPosyOptions } : { active: false }} />
         )}
         {view === "detail" && selected && (
           <DetailView
@@ -4435,12 +4570,22 @@ function PublicRekapView({ onBack }) {
   }, [years.length]);
 
   const pf = usePeriodFilter(today, allRecords);
+  const [kohortUsia, setKohortUsia] = useState("Semua"); // Kohort usia sasaran (lihat AGE_COHORTS)
 
   // Sama seperti DinasView: agregasi kabupaten ini berat, jadi di-memo dan
   // dihitung sebelum early-return "loading" agar urutan hook tetap konsisten.
   const agg = useMemo(() => {
     const cohort = tahun ? allRecords.filter((r) => r.tgl_lahir && String(r.tgl_lahir).slice(0, 4) === tahun) : allRecords;
-    const scope = applyPeriodFilterToRecords(cohort, pf.cumEnd);
+    const periodScope = applyPeriodFilterToRecords(cohort, pf.cumEnd);
+    const refDate = cohortRefDate(pf.cumEnd, today);
+    const ageCounts = {};
+    let ageTotal = 0;
+    const withAge = periodScope.map((r) => {
+      const k = ageCohortKeyOf(r, refDate);
+      if (notDropout(r)) { ageTotal++; if (k) ageCounts[k] = (ageCounts[k] || 0) + 1; }
+      return k;
+    });
+    const scope = kohortUsia === "Semua" ? periodScope : periodScope.filter((r, i) => withAge[i] === kohortUsia);
     const pkmWithData = Array.from(new Set(scope.map((r) => r._pkm))).sort((a, b) => a.localeCompare(b, "id"));
     const aktif = scope.filter(notDropout);
     const total = aktif.length;
@@ -4475,9 +4620,9 @@ function PublicRekapView({ onBack }) {
     const { rows: ind5Rows, totalRow: ind5Total } = computeIndicator5Rows(recordsByPkm, pusdatinMap, pf.cumEnd);
     const { pkmRows: ind5DesaPkmRows, grandTotalRow: ind5DesaGrandTotal } = computeIndicator5ByDesaAllPkm(recordsByPkm, pf.cumEnd);
 
-    return { scope, pkmWithData, total, L, P, dasarLengkap, lanjutanLengkap, overdueTotal, overdueBabies, chartData, ind5Rows, ind5Total, ind5DesaPkmRows, ind5DesaGrandTotal };
-  }, [allRecords, tahun, pusdatinMap, today, sasaranDesaVersion, pf.cumEnd]);
-  const { scope, pkmWithData, total, L, P, dasarLengkap, lanjutanLengkap, overdueTotal, overdueBabies, chartData, ind5Rows, ind5Total, ind5DesaPkmRows, ind5DesaGrandTotal } = agg;
+    return { scope, ageCounts, ageTotal, pkmWithData, total, L, P, dasarLengkap, lanjutanLengkap, overdueTotal, overdueBabies, chartData, ind5Rows, ind5Total, ind5DesaPkmRows, ind5DesaGrandTotal };
+  }, [allRecords, tahun, pusdatinMap, today, sasaranDesaVersion, pf.cumEnd, kohortUsia]);
+  const { scope, ageCounts, ageTotal, pkmWithData, total, L, P, dasarLengkap, lanjutanLengkap, overdueTotal, overdueBabies, chartData, ind5Rows, ind5Total, ind5DesaPkmRows, ind5DesaGrandTotal } = agg;
   const ind5DesaPkmRowsFiltered = desaFilterPkm === "__semua__" ? ind5DesaPkmRows : ind5DesaPkmRows.filter((g) => g.slug === desaFilterPkm);
 
   if (loading) {
@@ -4537,10 +4682,15 @@ function PublicRekapView({ onBack }) {
             </select>
           </label>
         </div>
-        <PeriodFilterBar pf={pf} />
+        <PeriodFilterBar pf={pf} cohort={{ value: kohortUsia, onChange: setKohortUsia, counts: ageCounts, total: ageTotal }} />
+        {kohortUsia !== "Semua" && (
+          <div className="panel-note no-print" style={{ marginBottom: 14 }}>
+            Seluruh angka di halaman ini hanya untuk sasaran usia <b>{ageCohortLabel(kohortUsia)}</b> pada akhir periode ({pf.label}).
+          </div>
+        )}
 
         <div className="stat-grid">
-          <StatCard label={`Total Bayi Terdata (Kohort ${tahun || "Semua"})`} value={total} sub={`L ${fmtNum(L)} · P ${fmtNum(P)} · s.d. ${pf.label}`} />
+          <StatCard label={`Total Bayi Terdata (Kohort ${tahun || "Semua"}${kohortUsia === "Semua" ? "" : " · " + ageCohortLabel(kohortUsia)})`} value={total} sub={`L ${fmtNum(L)} · P ${fmtNum(P)} · s.d. ${pf.label}`} />
           {INDICATOR_DEFS.map((d, i) => {
             const ind = ind5Total.indicators[i];
             const pct = ind.pctRiil;
@@ -4636,7 +4786,7 @@ function DinasView({ onBack, onSwitchAccount }) {
   const [importMsg, setImportMsg] = useState("");
   const [bulkImportMsg, setBulkImportMsg] = useState({ bayi: "", wus: "", bumil: "", balita: "" });
   const [desaFilterPkm, setDesaFilterPkm] = useState("__semua__");
-  const [kohortDinas, setKohortDinas] = useState("Semua"); // Kohort Sasaran (tahun lahir) untuk tabel rincian per desa
+  const [kohortDinas, setKohortDinas] = useState("Semua"); // Kohort usia sasaran ("Semua" | "0-11" | "12-23" | ... | "60+"): menyaring seluruh dasbor Rekap Capaian
   const [showSasaranDesaImport, setShowSasaranDesaImport] = useState(false);
   const [sasaranDesaVersion, setSasaranDesaVersion] = useState(0);
   const today = useMemo(() => new Date(), []);
@@ -4748,7 +4898,17 @@ function DinasView({ onBack, onSwitchAccount }) {
   // berubah — bukan setiap render (mis. tiap ketikan pada form target
   // Pusdatin, pindah tab, buka modal sebaran, dsb).
   const agg = useMemo(() => {
-    const scope = applyPeriodFilterToRecords(basisAll, pf.cumEnd);
+    const periodScope = applyPeriodFilterToRecords(basisAll, pf.cumEnd);
+    // Kohort usia: saring seluruh data dasbor menurut kelompok usia pada tanggal acuan periode.
+    const refDate = cohortRefDate(pf.cumEnd, today);
+    const ageCounts = {};
+    let ageTotal = 0;
+    const withAge = periodScope.map((r) => {
+      const k = ageCohortKeyOf(r, refDate);
+      if (notDropout(r)) { ageTotal++; if (k) ageCounts[k] = (ageCounts[k] || 0) + 1; }
+      return k;
+    });
+    const scope = kohortDinas === "Semua" ? periodScope : periodScope.filter((r, i) => withAge[i] === kohortDinas);
     const pkmWithData = Array.from(new Set(scope.map((r) => r._pkm))).sort((a, b) => a.localeCompare(b, "id"));
     const aktif = scope.filter(notDropout);
     const total = aktif.length;
@@ -4783,32 +4943,12 @@ function DinasView({ onBack, onSwitchAccount }) {
     const { rows: ind5Rows, totalRow: ind5Total } = computeIndicator5Rows(recordsByPkm, pusdatinMap, pf.cumEnd);
     const { pkmRows: ind5DesaPkmRows, grandTotalRow: ind5DesaGrandTotal } = computeIndicator5ByDesaAllPkm(recordsByPkm, pf.cumEnd);
 
-    return { scope, pkmWithData, total, L, P, dasarLengkap, lanjutanLengkap, overdueTotal, overdueBabies, chartData, recordsByPkm, ind5Rows, ind5Total, ind5DesaPkmRows, ind5DesaGrandTotal };
-  }, [basisAll, pusdatinMap, today, sasaranDesaVersion, pf.cumEnd]);
-  const { scope: pfScope, pkmWithData, total, L, P, dasarLengkap, lanjutanLengkap, overdueTotal, overdueBabies, chartData, ind5Rows, ind5Total, ind5DesaPkmRows, ind5DesaGrandTotal: ind5DesaGrandTotalAll } = agg;
-  /* Kohort Sasaran (tahun lahir) — hanya memengaruhi tabel rincian per Desa/Kelurahan.
-     Sasaran Riil & Capaian dihitung dari bayi lahir pada tahun terpilih; kolom Pusdatin tetap target tahunan. */
-  const kohortYearsDinas = useMemo(
-    () => Array.from(new Set((pfScope || []).map((r) => (r.tgl_lahir ? String(r.tgl_lahir).slice(0, 4) : null)).filter(Boolean))).sort(),
-    [pfScope]
-  );
-  const kohortCountsDinas = useMemo(() => {
-    const m = {};
-    (pfScope || []).forEach((r) => { const y = r.tgl_lahir ? String(r.tgl_lahir).slice(0, 4) : "-"; if (notDropout(r)) m[y] = (m[y] || 0) + 1; });
-    return m;
-  }, [pfScope]);
-  const desaKohort = useMemo(() => {
-    if (kohortDinas === "Semua") return { pkmRows: ind5DesaPkmRows, grandTotalRow: ind5DesaGrandTotalAll };
-    const byPkm = {};
-    (pfScope || []).forEach((r) => {
-      if (!r.tgl_lahir || String(r.tgl_lahir).slice(0, 4) !== kohortDinas) return;
-      if (!byPkm[r._pkm]) byPkm[r._pkm] = [];
-      byPkm[r._pkm].push(r);
-    });
-    return computeIndicator5ByDesaAllPkm(byPkm, pf.cumEnd);
-  }, [kohortDinas, pfScope, ind5DesaPkmRows, ind5DesaGrandTotalAll, pf.cumEnd, sasaranDesaVersion]);
-  const ind5DesaGrandTotal = desaKohort.grandTotalRow;
-  const ind5DesaPkmRowsFiltered = desaFilterPkm === "__semua__" ? desaKohort.pkmRows : desaKohort.pkmRows.filter((g) => g.slug === desaFilterPkm);
+    return { scope, ageCounts, ageTotal, pkmWithData, total, L, P, dasarLengkap, lanjutanLengkap, overdueTotal, overdueBabies, chartData, recordsByPkm, ind5Rows, ind5Total, ind5DesaPkmRows, ind5DesaGrandTotal };
+  }, [basisAll, pusdatinMap, today, sasaranDesaVersion, pf.cumEnd, kohortDinas]);
+  const { scope: pfScope, ageCounts, ageTotal, pkmWithData, total, L, P, dasarLengkap, lanjutanLengkap, overdueTotal, overdueBabies, chartData, ind5Rows, ind5Total, ind5DesaPkmRows, ind5DesaGrandTotal: ind5DesaGrandTotalAll } = agg;
+  // Kohort usia sudah diterapkan ke seluruh dasbor (lihat agg), jadi tabel per desa langsung memakai hasilnya.
+  const ind5DesaGrandTotal = ind5DesaGrandTotalAll;
+  const ind5DesaPkmRowsFiltered = desaFilterPkm === "__semua__" ? ind5DesaPkmRows : ind5DesaPkmRows.filter((g) => g.slug === desaFilterPkm);
 
   if (loading) {
     return (
@@ -4834,17 +4974,17 @@ function DinasView({ onBack, onSwitchAccount }) {
   function exportPdf() {
     window.print();
   }
-  const desaFileBase = `rekap-per-desa-imunisasi-kabupaten-jember${kohortDinas === "Semua" ? "" : "-kohort-" + kohortDinas}-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
+  const desaFileBase = `rekap-per-desa-imunisasi-kabupaten-jember${kohortDinas === "Semua" ? "" : "-usia-" + kohortDinas.replace("+", "plus")}-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
   function exportDesaCsv() {
-    const header = [...indicator5ByDesaAllPkmExportHeader(), "Kohort Sasaran (Tahun Lahir)"];
+    const header = [...indicator5ByDesaAllPkmExportHeader(), "Kohort Usia Sasaran"];
     const body = [];
-    ind5DesaPkmRowsFiltered.forEach((g) => g.rows.forEach((r) => body.push([...indicator5ByDesaAllPkmExportRow(g.pkm, r), kohortDinas])));
+    ind5DesaPkmRowsFiltered.forEach((g) => g.rows.forEach((r) => body.push([...indicator5ByDesaAllPkmExportRow(g.pkm, r), ageCohortLabel(kohortDinas)])));
     downloadCSV(`${desaFileBase}.csv`, [header, ...body]);
   }
   function exportDesaExcel() {
-    const header = [...indicator5ByDesaAllPkmExportHeader(), "Kohort Sasaran (Tahun Lahir)"];
+    const header = [...indicator5ByDesaAllPkmExportHeader(), "Kohort Usia Sasaran"];
     const body = [];
-    ind5DesaPkmRowsFiltered.forEach((g) => g.rows.forEach((r) => body.push([...indicator5ByDesaAllPkmExportRow(g.pkm, r), kohortDinas])));
+    ind5DesaPkmRowsFiltered.forEach((g) => g.rows.forEach((r) => body.push([...indicator5ByDesaAllPkmExportRow(g.pkm, r), ageCohortLabel(kohortDinas)])));
     const ws = XLSX.utils.aoa_to_sheet([header, ...body]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Rekap per Desa");
@@ -4926,10 +5066,15 @@ function DinasView({ onBack, onSwitchAccount }) {
           </div>
         </div>
 
-        <PeriodFilterBar pf={pf} />
+        <PeriodFilterBar pf={pf} cohort={{ value: kohortDinas, onChange: setKohortDinas, counts: ageCounts, total: ageTotal }} />
+        {kohortDinas !== "Semua" && (
+          <div className="panel-note no-print" style={{ marginBottom: 14 }}>
+            Seluruh angka di halaman ini hanya untuk sasaran usia <b>{ageCohortLabel(kohortDinas)}</b> pada akhir periode ({pf.label}). Kolom target Pusdatin tetap target tahunan, jadi gunakan % thd Sasaran Riil untuk analisis kohort usia.
+          </div>
+        )}
 
         <div className="stat-grid">
-          <StatCard label="Total Bayi Terdata (50 PKM)" value={total} sub={`L ${fmtNum(L)} · P ${fmtNum(P)} · s.d. ${pf.label}`} />
+          <StatCard label={kohortDinas === "Semua" ? "Total Bayi Terdata (50 PKM)" : `Total Bayi Terdata (50 PKM) · ${ageCohortLabel(kohortDinas)}`} value={total} sub={`L ${fmtNum(L)} · P ${fmtNum(P)} · s.d. ${pf.label}`} />
           <StatCard label="Imunisasi Dasar Lengkap" value={total ? `${Math.round((dasarLengkap / total) * 100)}%` : "0%"} sub={`${fmtNum(dasarLengkap)} dari ${fmtNum(total)} bayi`} accent={achievementColor(total ? Math.round((dasarLengkap / total) * 100) : 0)} />
           <StatCard label="Lanjutan (Booster) Lengkap" value={total ? `${Math.round((lanjutanLengkap / total) * 100)}%` : "0%"} sub={`${fmtNum(lanjutanLengkap)} dari ${fmtNum(total)} bayi`} accent={achievementColor(total ? Math.round((lanjutanLengkap / total) * 100) : 0)} />
           <StatCard label="Bayi dengan Jadwal Terlambat" value={overdueBabies} sub={`${fmtNum(overdueTotal)} dosis tertunggak`} accent="var(--danger)" />
@@ -5012,20 +5157,6 @@ function DinasView({ onBack, onSwitchAccount }) {
                 ))}
               </select>
             </label>
-            <label className="field" style={{ maxWidth: 260 }}>
-              <span>Kohort Sasaran (Tahun Lahir)</span>
-              <select className="select" value={kohortDinas} onChange={(e) => setKohortDinas(e.target.value)}>
-                <option value="Semua">Semua Kohort ({fmtNum((pfScope || []).filter(notDropout).length)} bayi)</option>
-                {kohortYearsDinas.map((y) => (
-                  <option key={y} value={y}>Lahir {y} ({fmtNum(kohortCountsDinas[y] || 0)} bayi)</option>
-                ))}
-              </select>
-            </label>
-            {kohortDinas !== "Semua" && (
-              <span className="panel-note" style={{ alignSelf: "flex-end" }}>
-                Sasaran Riil & Capaian hanya bayi lahir {kohortDinas}; kolom Pusdatin tetap target tahunan.
-              </span>
-            )}
           </div>
           <Indicator5ByDesaAllPkmTable pkmRows={ind5DesaPkmRowsFiltered} grandTotalRow={ind5DesaGrandTotal} />
         </div>
@@ -7493,23 +7624,23 @@ function HelpdeskDinasView() {
 function Dashboard({ records: recordsAll, today, posyList, posyFilter, setPosyFilter, setView, setSelectedId, isOperator, assignedPosy, slug, pkm, sasaranDesaVersion }) {
   const pf = usePeriodFilter(today, recordsAll);
 
-  /* Kohort Sasaran (tahun lahir) — berlaku untuk SELURUH dasbor ini: kartu ringkasan, grafik capaian per antigen,
+  /* Kohort Usia Sasaran — berlaku untuk SELURUH dasbor ini: kartu ringkasan, grafik capaian per antigen,
      peta wilayah, tabel per desa, dan breakdown gizi, sehingga angka & grafiknya selalu sama.
-     "Semua" = tanpa filter. Kolom/target Pusdatin per desa tetap target tahunan (tidak ikut terfilter). */
+     Usia dihitung pada akhir periode terpilih (maks. hari ini). "Semua" = tanpa filter.
+     Kolom/target Pusdatin per desa tetap target tahunan (tidak ikut terfilter). */
   const [kohortDesa, setKohortDesa] = useState("Semua");
-  const kohortYears = useMemo(
-    () => Array.from(new Set((recordsAll || []).map((r) => (r.tgl_lahir ? String(r.tgl_lahir).slice(0, 4) : null)).filter(Boolean))).sort(),
-    [recordsAll]
-  );
-  const kohortCounts = useMemo(() => {
-    const m = {};
-    (recordsAll || []).forEach((r) => { const y = r.tgl_lahir ? String(r.tgl_lahir).slice(0, 4) : "-"; if (notDropout(r)) m[y] = (m[y] || 0) + 1; });
-    return m;
-  }, [recordsAll]);
-  const records = useMemo(
-    () => (kohortDesa === "Semua" ? recordsAll : (recordsAll || []).filter((r) => r.tgl_lahir && String(r.tgl_lahir).slice(0, 4) === kohortDesa)),
-    [recordsAll, kohortDesa]
-  );
+  const { ageCounts: kohortCounts, ageTotal: kohortTotal, records } = useMemo(() => {
+    const ref = cohortRefDate(pf.cumEnd, today);
+    const counts = {};
+    let tot = 0;
+    const keyed = (recordsAll || []).map((r) => {
+      const k = ageCohortKeyOf(r, ref);
+      if (notDropout(r)) { tot++; if (k) counts[k] = (counts[k] || 0) + 1; }
+      return k;
+    });
+    const recs = kohortDesa === "Semua" ? recordsAll : (recordsAll || []).filter((r, idx) => keyed[idx] === kohortDesa);
+    return { ageCounts: counts, ageTotal: tot, records: recs };
+  }, [recordsAll, kohortDesa, pf.cumEnd, today]);
 
   // Semua agregasi dasbor dibungkus dalam satu useMemo, dan completeness()
   // sekarang hanya dihitung SEKALI per bayi (sebelumnya dihitung dua kali:
@@ -7567,19 +7698,19 @@ function Dashboard({ records: recordsAll, today, posyList, posyFilter, setPosyFi
   const [selectedAntigen, setSelectedAntigen] = useState(null);
 
   function exportIndicatorByDesaExcel() {
-    const header = [...indicator5ByDesaExportHeader(), "Kohort Sasaran (Tahun Lahir)"];
-    const body = ind5DesaRows.map((r) => [...indicator5ByDesaExportRow(r), kohortDesa]);
-    const totalBody = [...indicator5ByDesaExportRow(ind5DesaTotal), kohortDesa];
+    const header = [...indicator5ByDesaExportHeader(), "Kohort Usia Sasaran"];
+    const body = ind5DesaRows.map((r) => [...indicator5ByDesaExportRow(r), ageCohortLabel(kohortDesa)]);
+    const totalBody = [...indicator5ByDesaExportRow(ind5DesaTotal), ageCohortLabel(kohortDesa)];
     const ws = XLSX.utils.aoa_to_sheet([header, ...body, totalBody]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Cakupan per Desa");
-    XLSX.writeFile(wb, `cakupan-5-indikator-per-desa-${slug}${kohortDesa === "Semua" ? "" : "-kohort-" + kohortDesa}-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}.xlsx`);
+    XLSX.writeFile(wb, `cakupan-5-indikator-per-desa-${slug}${kohortDesa === "Semua" ? "" : "-usia-" + kohortDesa.replace("+", "plus")}-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}.xlsx`);
   }
   function exportIndicatorByDesaCsv() {
-    const header = [...indicator5ByDesaExportHeader(), "Kohort Sasaran (Tahun Lahir)"];
-    const body = ind5DesaRows.map((r) => [...indicator5ByDesaExportRow(r), kohortDesa]);
-    const totalBody = [...indicator5ByDesaExportRow(ind5DesaTotal), kohortDesa];
-    downloadCSV(`cakupan-5-indikator-per-desa-${slug}${kohortDesa === "Semua" ? "" : "-kohort-" + kohortDesa}-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}.csv`, [header, ...body, totalBody]);
+    const header = [...indicator5ByDesaExportHeader(), "Kohort Usia Sasaran"];
+    const body = ind5DesaRows.map((r) => [...indicator5ByDesaExportRow(r), ageCohortLabel(kohortDesa)]);
+    const totalBody = [...indicator5ByDesaExportRow(ind5DesaTotal), ageCohortLabel(kohortDesa)];
+    downloadCSV(`cakupan-5-indikator-per-desa-${slug}${kohortDesa === "Semua" ? "" : "-usia-" + kohortDesa.replace("+", "plus")}-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}.csv`, [header, ...body, totalBody]);
   }
 
   return (
@@ -7600,24 +7731,12 @@ function Dashboard({ records: recordsAll, today, posyList, posyFilter, setPosyFi
         {isOperator && <span className="lock-note">🔒 Terkunci untuk Operator Posyandu {assignedPosy}</span>}
       </div>
 
-      <PeriodFilterBar pf={pf} />
-
-      <div className="toolbar no-print" style={{ marginBottom: 14 }}>
-        <label className="field" style={{ maxWidth: 260 }}>
-          <span>Kohort Sasaran (Tahun Lahir)</span>
-          <select className="select" value={kohortDesa} onChange={(e) => setKohortDesa(e.target.value)}>
-            <option value="Semua">Semua Kohort ({fmtNum((recordsAll || []).filter(notDropout).length)} bayi)</option>
-            {kohortYears.map((y) => (
-              <option key={y} value={y}>Lahir {y} ({fmtNum(kohortCounts[y] || 0)} bayi)</option>
-            ))}
-          </select>
-        </label>
-        {kohortDesa !== "Semua" && (
-          <span className="panel-note" style={{ alignSelf: "flex-end" }}>
-            Seluruh angka & grafik di dasbor ini hanya untuk bayi lahir {kohortDesa}. Target Pusdatin/sasaran desa tetap target tahunan, jadi gunakan % thd Data Basis / % Riil untuk analisis kohort.
-          </span>
-        )}
-      </div>
+      <PeriodFilterBar pf={pf} cohort={{ value: kohortDesa, onChange: setKohortDesa, counts: kohortCounts, total: kohortTotal }} />
+      {kohortDesa !== "Semua" && (
+        <div className="panel-note no-print" style={{ marginBottom: 14 }}>
+          Seluruh angka & grafik di dasbor ini hanya untuk sasaran usia <b>{ageCohortLabel(kohortDesa)}</b> pada akhir periode ({pf.label}). Target Pusdatin/sasaran desa tetap target tahunan, jadi gunakan % thd Data Basis / % Riil untuk analisis kohort usia.
+        </div>
+      )}
 
       <div className="stat-grid">
         <StatCard label="Bayi Terdaftar" value={total} sub={`L ${fmtNum(L)} · P ${fmtNum(P)} · s.d. ${pf.label}`} />
@@ -7759,7 +7878,9 @@ function ListView({ filtered, today, posyList, posyFilter, setPosyFilter, search
     return arr;
   }, [refined, sortKey]);
 
-  const activeFilterCount = [jkFilter, desaFilter, statusFilter].filter((v) => v !== "Semua").length;
+  // Desa yang dikunci oleh akun Operator bukan filter pilihan pengguna: tidak dihitung dan tidak ikut direset.
+  const lockedDesa = locked && operatorLock.desa ? operatorLock.desa : "";
+  const activeFilterCount = [jkFilter, lockedDesa ? "Semua" : desaFilter, statusFilter].filter((v) => v !== "Semua").length;
 
   // completeness()/parseCompact() dihitung sekali per baris di sini, lalu
   // dipakai ulang baik untuk render tabel maupun data ekspor CSV/Excel
@@ -7900,7 +8021,7 @@ function ListView({ filtered, today, posyList, posyFilter, setPosyFilter, search
             className="btn-secondary"
             onClick={() => {
               setJkFilter("Semua");
-              setDesaFilter("Semua");
+              setDesaFilter(lockedDesa || "Semua");
               setStatusFilter("Semua");
             }}
           >
@@ -8097,7 +8218,9 @@ function KendaliSasaranView({ filtered, today, posyList, posyFilter, setPosyFilt
   const rangeStart = sorted.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
   const rangeEnd = Math.min(safePage * pageSize, sorted.length);
 
-  const activeFilterCount = [jkFilter, desaFilter].filter((v) => v !== "Semua").length;
+  // Desa yang dikunci oleh akun Operator bukan filter pilihan pengguna: tidak dihitung dan tidak ikut direset.
+  const lockedDesa = locked && operatorLock.desa ? operatorLock.desa : "";
+  const activeFilterCount = [jkFilter, lockedDesa ? "Semua" : desaFilter].filter((v) => v !== "Semua").length;
 
   const rows = useMemo(
     () =>
@@ -8215,7 +8338,7 @@ function KendaliSasaranView({ filtered, today, posyList, posyFilter, setPosyFilt
             className="btn-secondary"
             onClick={() => {
               setJkFilter("Semua");
-              setDesaFilter("Semua");
+              setDesaFilter(lockedDesa || "Semua");
             }}
           >
             Reset Filter ({activeFilterCount})
@@ -9236,7 +9359,7 @@ function GenericImportView({ catDef, pkm, onImport, superAdmin }) {
 }
 
 /* ---------- Generic Edit/Add Modal (Balita / WUS / Ibu Hamil) ---------- */
-function GenericEditModal({ catDef, rec, onCancel, onSave }) {
+function GenericEditModal({ catDef, rec, onCancel, onSave, lockPosy, lockDesa, posyOptions }) {
   const [form, setForm] = useState(() => ({ ...rec }));
   function setField(k, v) {
     setForm((f) => ({ ...f, [k]: v }));
@@ -9257,8 +9380,14 @@ function GenericEditModal({ catDef, rec, onCancel, onSave }) {
         <div className="form-grid">
           {allFields.map((f) => (
             <label className="field" key={f.key}>
-              <span>{f.label}</span>
-              {f.type === "date" ? (
+              <span>{f.label}{f.required ? " (wajib)" : ""}</span>
+              {f.key === "posy" && lockPosy && posyOptions && posyOptions.length > 1 ? (
+                <select className="select" value={form.posy || ""} onChange={(e) => setField("posy", e.target.value)}>
+                  {posyOptions.map((o) => (<option key={o} value={o}>{o}</option>))}
+                </select>
+              ) : (f.key === "posy" && lockPosy) || (f.key === "desa" && lockDesa) ? (
+                <input className="input" value={form[f.key] || ""} disabled title="Dikunci sesuai penugasan akun Operator" readOnly />
+              ) : f.type === "date" ? (
                 <input type="date" className="input" value={compactToInputDate(form[f.key])} onChange={(e) => setField(f.key, inputDateToCompact(e.target.value))} />
               ) : f.type === "jk" ? (
                 <select className="select" value={form[f.key] || "L"} onChange={(e) => setField(f.key, e.target.value)}>
@@ -9283,16 +9412,27 @@ function GenericEditModal({ catDef, rec, onCancel, onSave }) {
 }
 
 /* ---------- Generic Sasaran List View (Balita / WUS / Ibu Hamil) ---------- */
-function GenericSasaranListView({ catDef, records: recordsRaw, pkm, onSave, onDelete }) {
-  const records = useMemo(() => rapikanList(recordsRaw), [recordsRaw]);
+function GenericSasaranListView({ catDef, records: recordsRaw, pkm, onSave, onDelete, operatorLock }) {
+  // Akun Operator Posyandu hanya melihat & mengelola data pada Posyandu (dan Desa/Kelurahan) yang ditugaskan,
+  // sama seperti Data Basis Sasaran (Manual Book Bab 1.4 dan Bab 12).
+  const locked = !!(operatorLock && operatorLock.active);
+  const lockPosy = locked ? String(operatorLock.posy || "") : "";
+  const lockDesa = locked ? String(operatorLock.desa || "") : "";
+  const lockOptions = locked ? ((operatorLock.posyOptions && operatorLock.posyOptions.length ? operatorLock.posyOptions : [lockPosy]).map(String)) : [];
+  const lockOptionsKey = lockOptions.join("|");
+  const allRecords = useMemo(() => rapikanList(recordsRaw), [recordsRaw]);
+  const records = useMemo(
+    () => (!locked ? allRecords : allRecords.filter((r) => lockOptions.includes(String(r.posy)) && (!lockDesa || !r.desa || normDesaKey(r.desa) === normDesaKey(lockDesa)))),
+    [allRecords, locked, lockOptionsKey, lockDesa]
+  );
   const [search, setSearch] = useState("");
-  const [posyFilter, setPosyFilter] = useState("Semua");
+  const [posyFilter, setPosyFilter] = useState(locked ? lockPosy : "Semua");
   const [modalRec, setModalRec] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const posyList = useMemo(
-    () => Array.from(new Set(records.map((r) => String(r.posy || "")).filter(Boolean))).sort((a, b) => a.localeCompare(b, "id", { numeric: true })),
-    [records]
+    () => (locked ? lockOptions : Array.from(new Set(records.map((r) => String(r.posy || "")).filter(Boolean))).sort((a, b) => a.localeCompare(b, "id", { numeric: true }))),
+    [records, locked, lockOptionsKey]
   );
   const filtered = useMemo(
     () =>
@@ -9305,8 +9445,13 @@ function GenericSasaranListView({ catDef, records: recordsRaw, pkm, onSave, onDe
   );
 
   function openAdd() {
-    const nextNo = Math.max(0, ...records.map((r) => Number(r.no) || 0)) + 1;
-    setModalRec(emptyGenericRecord(catDef, nextNo));
+    const nextNo = Math.max(0, ...allRecords.map((r) => Number(r.no) || 0)) + 1;
+    const fresh = emptyGenericRecord(catDef, nextNo);
+    if (locked) {
+      fresh.posy = posyFilter !== "Semua" ? posyFilter : lockPosy;
+      if (lockDesa) fresh.desa = lockDesa;
+    }
+    setModalRec(fresh);
   }
 
   return (
@@ -9324,12 +9469,13 @@ function GenericSasaranListView({ catDef, records: recordsRaw, pkm, onSave, onDe
       <div className="panel">
         <div className="filter-row" style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
           <input className="input" style={{ maxWidth: 260 }} placeholder={`Cari nama ${catDef.labelSatuan}...`} value={search} onChange={(e) => setSearch(e.target.value)} />
-          <select className="select" style={{ maxWidth: 220 }} value={posyFilter} onChange={(e) => setPosyFilter(e.target.value)}>
-            <option value="Semua">Semua Posyandu</option>
+          <select className="select" style={{ maxWidth: 220 }} value={posyFilter} disabled={locked && lockOptions.length <= 1} onChange={(e) => setPosyFilter(e.target.value)}>
+            {!locked && <option value="Semua">Semua Posyandu</option>}
             {posyList.map((p) => (
               <option key={p} value={p}>{p}</option>
             ))}
           </select>
+          {locked && <span className="lock-note">🔒 Terkunci untuk Operator Posyandu {lockPosy}</span>}
         </div>
         <div className="table-wrap">
           <table className="table small">
@@ -9374,6 +9520,9 @@ function GenericSasaranListView({ catDef, records: recordsRaw, pkm, onSave, onDe
         <GenericEditModal
           catDef={catDef}
           rec={modalRec}
+          lockPosy={locked}
+          lockDesa={!!lockDesa}
+          posyOptions={lockOptions}
           onCancel={() => setModalRec(null)}
           onSave={(rec) => {
             onSave(rec);
@@ -9978,6 +10127,36 @@ const PERIOD_LABELS = {
   semester: ["Semester 1 (Jan–Jun)", "Semester 2 (Jul–Des)"],
 };
 
+/* ---------- Filter Kohort Usia (kelompok usia sasaran) ----------
+   Usia dihitung dalam bulan penuh pada TANGGAL ACUAN = akhir periode terpilih (cumEnd), maksimal hari ini
+   (periode yang belum selesai memakai tanggal hari ini). Dipakai untuk menyaring seluruh angka dasbor. */
+const AGE_COHORTS = [
+  { key: "0-11", label: "0–11 bulan", min: 0, max: 11 },
+  { key: "12-23", label: "12–23 bulan", min: 12, max: 23 },
+  { key: "24-35", label: "24–35 bulan", min: 24, max: 35 },
+  { key: "36-47", label: "36–47 bulan", min: 36, max: 47 },
+  { key: "48-59", label: "48–59 bulan", min: 48, max: 59 },
+  // Usia ≥ 60 bulan tidak disediakan: sasaran berusia ≥ 59 bulan 10 hari otomatis keluar sebagai Dropout (lihat DROPOUT_USIA_*),
+  // sehingga tidak pernah masuk hitungan sasaran aktif. Tambahkan { key: "60+", min: 60, max: Infinity } bila kelak diperlukan.
+];
+function ageCohortLabel(key) {
+  if (!key || key === "Semua") return "Semua usia";
+  const c = AGE_COHORTS.find((x) => x.key === key);
+  return c ? c.label : key;
+}
+function cohortRefDate(cumEnd, today) {
+  return cumEnd > today ? today : cumEnd;
+}
+function ageCohortKeyOf(rec, ref) {
+  const b = parseCompact(rec.tgl_lahir);
+  if (!b || b > ref) return null;
+  let months = (ref.getFullYear() - b.getFullYear()) * 12 + (ref.getMonth() - b.getMonth());
+  if (ref.getDate() < b.getDate()) months -= 1;
+  if (months < 0) months = 0;
+  const c = AGE_COHORTS.find((x) => months >= x.min && months <= x.max);
+  return c ? c.key : null;
+}
+
 /* ---------- Filter Periode Capaian (Bulanan / Triwulanan / Semester / Akumulasi 1 Tahun) ----------
    Dipakai bersama oleh dasbor Dinas (Rekap Capaian), Akses Publik, dan Puskesmas, supaya ketiganya
    punya cara yang sama untuk memilih periode dan menghitung "capaian sampai dengan akhir periode itu".
@@ -10012,7 +10191,8 @@ function usePeriodFilter(today, recordsForYearOptions) {
   return { periodKind, setPeriodKind, year, setYear, sub, setSub, allYears, cumStart, cumEnd, label };
 }
 
-function PeriodFilterBar({ pf }) {
+/* cohort (opsional): { value, onChange, counts, total } -> dropdown Kelompok Usia di baris yang sama dengan filter Tahun. */
+function PeriodFilterBar({ pf, cohort }) {
   return (
     <div className="toolbar no-print" style={{ marginBottom: 14 }}>
       <label className="field" style={{ maxWidth: 220 }}>
@@ -10058,6 +10238,17 @@ function PeriodFilterBar({ pf }) {
           <select className="select" value={pf.sub} onChange={(e) => pf.setSub(e.target.value)}>
             {PERIOD_LABELS.semester.map((b, i) => (
               <option key={b} value={i + 1}>{b}</option>
+            ))}
+          </select>
+        </label>
+      )}
+      {cohort && (
+        <label className="field" style={{ maxWidth: 260 }}>
+          <span>Kohort Usia Sasaran</span>
+          <select className="select" value={cohort.value} onChange={(e) => cohort.onChange(e.target.value)}>
+            <option value="Semua">Semua usia ({fmtNum(cohort.total || 0)} bayi)</option>
+            {AGE_COHORTS.map((c) => (
+              <option key={c.key} value={c.key}>{c.label} ({fmtNum((cohort.counts && cohort.counts[c.key]) || 0)} bayi)</option>
             ))}
           </select>
         </label>
@@ -12389,7 +12580,29 @@ function EditView({ rec, onCancel, onSave, currentPkm, onBatalMutasi }) {
     const birth = parseCompact(form.tgl_lahir);
     if (!birth) return null;
     const item = computeItemStatus(birth, parseCompact(form[s.key]), s, today);
-    return computeKejarInfo(s.key, birth, item.given, today, item.status);
+    return computeKejarInfo(s.key, birth, item.given, today, item.status, parseCompact(form.dpt1));
+  }
+  function intervalFor(s) {
+    const birth = parseCompact(form.tgl_lahir);
+    if (!birth) return null;
+    return computeIntervalInfo(s.key, birth, (k) => parseCompact(form[k]), today);
+  }
+  function maxDateFor(s) {
+    const birth = parseCompact(form.tgl_lahir);
+    if (!birth || !isZeroDoseCatchupKey(s.key)) return undefined;
+    return dateToInput(toCompact(zeroDoseCatchupLimit(birth)));
+  }
+  function overAgeFor(s) {
+    const birth = parseCompact(form.tgl_lahir);
+    const g = parseCompact(form[s.key]);
+    return !!(birth && g && isZeroDoseCatchupKey(s.key) && g > zeroDoseCatchupLimit(birth));
+  }
+  function lockedFor(s, kejar, iv) {
+    // Terkunci bila lewat batas usia kejar, ATAU jarak interval dari dosis sebelumnya belum terpenuhi (hanya saat kolom masih kosong).
+    return !!(kejar && kejar.locked) || !!(iv && !form[s.key] && iv.locked);
+  }
+  function minDateFor(iv) {
+    return iv && iv.earliest ? dateToInput(toCompact(iv.earliest)) : undefined;
   }
   function kejarDoneFor(s) {
     const birth = parseCompact(form.tgl_lahir);
@@ -12658,6 +12871,7 @@ function EditView({ rec, onCancel, onSave, currentPkm, onBatalMutasi }) {
         <div className="form-grid">
           {SCHEDULE.filter((s) => s.group === "dasar").map((s) => {
             const kejar = kejarFor(s);
+            const iv = intervalFor(s);
             return (
               <label className="field" key={s.key}>
                 <span>{s.label}</span>
@@ -12666,9 +12880,21 @@ function EditView({ rec, onCancel, onSave, currentPkm, onBatalMutasi }) {
                   className="input"
                   value={dateToInput(form[s.key])}
                   onChange={(e) => setField(s.key, inputToCompact(e.target.value))}
-                  disabled={!!(kejar && kejar.locked)}
-                  title={kejar ? kejar.label : undefined}
+                  disabled={lockedFor(s, kejar, iv)}
+                  min={minDateFor(iv)}
+                  max={maxDateFor(s)}
+                  title={kejar && kejar.locked ? kejar.label : iv && (iv.locked || iv.violation) ? iv.label : kejar ? kejar.label : undefined}
                 />
+                {overAgeFor(s) && (
+                  <div className="field-kejar-note">
+                    <span className="badge kejar-badge" style={{ color: "#B5332A", background: "#FCE0DE" }} title="Pemberian DPT/Polio/MR/PCV melebihi usia 59 bulan 5 hari">⚠ Melebihi usia 59 bln 5 hr</span>
+                  </div>
+                )}
+                {iv && (
+                  <div className="field-kejar-note">
+                    <IntervalBadge info={iv} given={!!form[s.key]} />
+                  </div>
+                )}
                 {kejar && (
                   <div className="field-kejar-note">
                     <KejarBadge info={kejar} />
@@ -12695,6 +12921,7 @@ function EditView({ rec, onCancel, onSave, currentPkm, onBatalMutasi }) {
         <div className="form-grid">
           {SCHEDULE.filter((s) => s.group === "lanjutan").map((s) => {
             const kejar = kejarFor(s);
+            const iv = intervalFor(s);
             return (
               <label className="field" key={s.key}>
                 <span>{s.label}</span>
@@ -12703,9 +12930,21 @@ function EditView({ rec, onCancel, onSave, currentPkm, onBatalMutasi }) {
                   className="input"
                   value={dateToInput(form[s.key])}
                   onChange={(e) => setField(s.key, inputToCompact(e.target.value))}
-                  disabled={!!(kejar && kejar.locked)}
-                  title={kejar ? kejar.label : undefined}
+                  disabled={lockedFor(s, kejar, iv)}
+                  min={minDateFor(iv)}
+                  max={maxDateFor(s)}
+                  title={kejar && kejar.locked ? kejar.label : iv && (iv.locked || iv.violation) ? iv.label : kejar ? kejar.label : undefined}
                 />
+                {overAgeFor(s) && (
+                  <div className="field-kejar-note">
+                    <span className="badge kejar-badge" style={{ color: "#B5332A", background: "#FCE0DE" }} title="Pemberian DPT/Polio/MR/PCV melebihi usia 59 bulan 5 hari">⚠ Melebihi usia 59 bln 5 hr</span>
+                  </div>
+                )}
+                {iv && (
+                  <div className="field-kejar-note">
+                    <IntervalBadge info={iv} given={!!form[s.key]} />
+                  </div>
+                )}
                 {kejar && (
                   <div className="field-kejar-note">
                     <KejarBadge info={kejar} />
