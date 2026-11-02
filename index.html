@@ -2688,6 +2688,97 @@ function indicator5ByDesaExportRow(r) {
   return row;
 }
 
+/* ---------- METADATA DEFINISI OPERASIONAL 5 INDIKATOR (dipakai panel di bawah tabel capaian) ----------
+   Teks di sini HARUS mengikuti perilaku computeIndicator5Rows / computeIndicator5RowsByDesa / indicatorFlags.
+   Daftar antigen diambil langsung dari SCHEDULE sehingga otomatis ikut bila jadwal berubah. */
+function indicatorMetadata() {
+  const lbl = (keys) => keys.map((k) => (SCHEDULE.find((s) => s.key === k) || {}).label || k);
+  return [
+    { short: "IDL", nama: "Imunisasi Dasar Lengkap", target: "Surviving Infant (SI)",
+      kriteria: `Bayi yang SELURUH ${DASAR_KEYS.length} antigen dasar sudah tercatat tanggal pemberiannya: ${lbl(DASAR_KEYS).join(", ")}.` },
+    { short: "IBL", nama: "Imunisasi Baduta Lengkap", target: "Baduta 12–23 bulan",
+      kriteria: `Bayi/baduta yang SELURUH ${LANJUTAN_KEYS.length} antigen lanjutan (booster) sudah tercatat: ${lbl(LANJUTAN_KEYS).join(", ")}.` },
+    { short: "MR 1", nama: "Imunisasi MR 1", target: "Surviving Infant (SI)", kriteria: "Bayi yang tanggal pemberian MR 1 sudah terisi." },
+    { short: "PCV 2", nama: "Imunisasi Antigen Baru (PCV 2)", target: "Surviving Infant (SI)", kriteria: "Bayi yang tanggal pemberian PCV 2 sudah terisi." },
+    { short: "RV 3", nama: "Imunisasi Antigen Baru (RV 3)", target: "Surviving Infant (SI)", kriteria: "Bayi yang tanggal pemberian Rotavirus 3 sudah terisi." },
+  ];
+}
+function IndicatorDefinitionPanel() {
+  const meta = indicatorMetadata();
+  return (
+    <details className="def-panel no-print">
+      <summary>ℹ️ Definisi operasional &amp; rumus perhitungan capaian</summary>
+      <div className="def-body">
+        <h3>Definisi Operasional Sasaran IDL</h3>
+        <p className="def-scale">
+          Secara operasional, sasaran bayi yang harus <b>diimunisasi dan mendapatkan IDL (Imunisasi Dasar Lengkap)</b> pada tahun laporan
+          adalah <b>bayi yang lahir pada periode 1 Januari s/d 31 Desember tahun sebelumnya</b>.
+          Ketentuan ini berlaku untuk setiap tahun laporan berikutnya:
+        </p>
+        <div className="table-wrap" style={{ marginTop: 8 }}>
+          <table className="table small def-table">
+            <thead><tr><th>Tahun laporan</th><th>Sasaran bayi IDL (periode lahir)</th></tr></thead>
+            <tbody>
+              <tr><td className="name-cell">2026</td><td>Bayi lahir 1 Januari 2025 s/d 31 Desember 2025</td></tr>
+              <tr><td className="name-cell">2027</td><td>Bayi lahir 1 Januari 2026 s/d 31 Desember 2026</td></tr>
+              <tr><td className="name-cell">Tahun T</td><td>Bayi lahir 1 Januari (T − 1) s/d 31 Desember (T − 1)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="def-note">
+          Catatan penerapan pada tabel ini: kolom <i>Sasaran Riil</i> saat ini menghitung seluruh bayi aktif pada data basis (usia 0–59 bulan),
+          belum dibatasi menurut tahun lahir di atas. Untuk menilai capaian sesuai definisi sasaran IDL, acuan utama adalah <i>% Pusdatin</i>
+          (target Surviving Infant resmi), atau gunakan filter Kohort Usia Sasaran bila tersedia.
+        </p>
+
+        <h3>Rumus</h3>
+        <ul>
+          <li><b>Sasaran Riil (L / P / Total)</b> = jumlah bayi <i>aktif</i> (bukan dropout) pada data basis Puskesmas di wilayah tersebut, dipecah menurut jenis kelamin; Total = L + P.</li>
+          <li><b>Target Pusdatin (SI / Baduta)</b> = angka sasaran resmi per Desa dari menu <i>Sasaran per Desa</i>. IDL, MR 1, PCV 2, dan RV 3 memakai <i>Surviving Infant</i>; IBL memakai <i>Baduta 12–23 bulan</i>. Pada tabel per Puskesmas, target ini diinput Dinas.</li>
+          <li><b>Capaian</b> = jumlah bayi yang memenuhi kriteria indikator (tabel di bawah), dihitung <i>kumulatif sampai akhir periode</i> yang dipilih.</li>
+          <li><b>% Pusdatin</b> = Capaian ÷ Target Pusdatin (Total) × 100, dibulatkan ke bilangan bulat. Tampil “–” bila target 0 atau belum ada.</li>
+          <li><b>% Riil</b> = Capaian ÷ Sasaran Riil (Total) × 100, dibulatkan ke bilangan bulat. Tampil “–” bila Sasaran Riil 0.</li>
+          <li><b>Baris TOTAL</b> = jumlah seluruh bayi di Puskesmas/kabupaten, bukan sekadar penjumlahan baris desa; bayi yang nama desanya tidak cocok dengan daftar resmi tetap ikut dihitung di TOTAL.</li>
+        </ul>
+
+        <h3>Kriteria Capaian per Indikator</h3>
+        <div className="table-wrap">
+          <table className="table small def-table">
+            <thead><tr><th>Indikator</th><th>Bayi dihitung sebagai capaian bila…</th><th>Penyebut % Pusdatin</th></tr></thead>
+            <tbody>
+              {meta.map((m) => (
+                <tr key={m.short}>
+                  <td className="name-cell">{m.short}<div className="def-sub">{m.nama}</div></td>
+                  <td>{m.kriteria}</td>
+                  <td>{m.target}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Aturan Data</h3>
+        <ul>
+          <li><b>Periode:</b> hanya tanggal imunisasi sampai akhir periode yang dipilih yang dihitung; bayi yang lahir setelah akhir periode tidak ikut. Filter kohort usia (bila dipilih) juga membatasi bayi yang dihitung.</li>
+          <li><b>Pencocokan desa:</b> bayi dikaitkan ke desa lewat kolom <i>Desa</i> (cadangan: <i>Posyandu</i> bila Desa kosong), tanpa membedakan huruf besar/kecil dan spasi berlebih.</li>
+          <li><b>Capaian vs dropout:</b> Capaian dihitung dari seluruh catatan imunisasi di data basis, sedangkan Sasaran Riil hanya bayi aktif. Bayi dropout yang imunisasinya sudah lengkap masih ikut sebagai capaian.</li>
+          <li><b>Membaca IBL:</b> % Riil IBL memakai seluruh bayi aktif sebagai penyebut (termasuk yang belum berusia 12 bulan), sehingga cenderung lebih rendah. Acuan utama IBL adalah % Pusdatin terhadap target Baduta.</li>
+          <li><b>Nilai di atas 100%</b> berarti bayi terdata/terimunisasi melebihi angka target Pusdatin, lazim terjadi bila target lebih kecil dari jumlah bayi sebenarnya (mis. sasaran dari desa lain atau pendatang).</li>
+        </ul>
+
+        <h3>Skala Warna Capaian</h3>
+        <p className="def-scale">0–49% Rendah · 50–74% Sedang · 75–89% Baik · 90% ke atas Optimal</p>
+
+        <h3>Contoh Perhitungan (IDL, Desa Cakru)</h3>
+        <p className="def-example">
+          Capaian 253 bayi · Target Pusdatin (SI Total) 155 · Sasaran Riil 304.<br />
+          % Pusdatin = 253 ÷ 155 × 100 = <b>163%</b> · % Riil = 253 ÷ 304 × 100 = <b>83%</b>.
+        </p>
+      </div>
+    </details>
+  );
+}
+
 /* ---------- Tabel rincian 5 indikator per Desa/Kelurahan (wilayah 1 Puskesmas) ---------- */
 function Indicator5ByDesaTable({ rows, totalRow }) {
   return (
@@ -2764,6 +2855,7 @@ function Indicator5ByDesaTable({ rows, totalRow }) {
         </tfoot>
       </table>
     </div>
+    <IndicatorDefinitionPanel />
     </div>
   );
 }
@@ -2872,6 +2964,7 @@ function Indicator5ByDesaAllPkmTable({ pkmRows, grandTotalRow }) {
         </tfoot>
       </table>
     </div>
+    <IndicatorDefinitionPanel />
     </div>
   );
 }
@@ -3240,6 +3333,7 @@ function Indicator5Table({ rows, totalRow, editable, pusdatinDraft, onDraftChang
         </tfoot>
       </table>
     </div>
+    <IndicatorDefinitionPanel />
     </div>
   );
 }
@@ -13658,6 +13752,20 @@ h2 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 17px; margin: 
   .main { padding: 20px; }
   .stat-grid, .form-grid, .immun-grid, .posy-grid, .kv-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ---------- Panel definisi operasional capaian ---------- */
+.def-panel { margin-top: 14px; border: 1px solid var(--line); border-radius: 12px; background: #FFFDFE; }
+.def-panel > summary { cursor: pointer; padding: 12px 16px; font-weight: 600; font-size: 13px; color: var(--primary-dark); list-style: none; }
+.def-panel > summary::-webkit-details-marker { display: none; }
+.def-panel[open] > summary { border-bottom: 1px solid var(--line); }
+.def-body { padding: 4px 18px 16px; font-size: 12.5px; line-height: 1.55; color: var(--ink); }
+.def-body h3 { font-family: 'Fraunces', serif; font-size: 14px; margin: 16px 0 6px; color: var(--primary-dark); }
+.def-body ul { margin: 0; padding-left: 18px; }
+.def-body li { margin-bottom: 4px; }
+.def-sub { font-weight: 400; font-size: 11.5px; color: var(--ink-soft); }
+.def-table td { vertical-align: top; }
+.def-note { margin: 8px 0 0; font-size: 12px; color: var(--ink-soft); }
+.def-scale, .def-example { margin: 0; padding: 8px 12px; border-radius: 10px; background: var(--primary-soft); }
 /* ---------- Seragam: semua tabel rata kiri, font konsisten ---------- */
 .table th, .table td,
 .table.dropout-table th, .table.dropout-table td,
