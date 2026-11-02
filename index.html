@@ -2463,10 +2463,31 @@ const INDICATOR_DEFS = [
   { key: "pcv2", label: "Imunisasi Antigen Baru (PCV 2)", short: "PCV 2", pusdatinLabel: "Surviving Infant" },
   { key: "rv3", label: "Imunisasi Antigen Baru (RV 3)", short: "RV 3", pusdatinLabel: "Surviving Infant" },
 ];
+/* ---------- IDL menurut Definisi Operasional Kemenkes ----------
+   Bayi dinyatakan IDL bila SEMUA antigen berikut sudah diberikan: HB-0 (< 24 jam), BCG 1x, Polio 4x,
+   DPT-HB/DPT-HB-Hib 3x, IPV 1x, MR 1x — dengan memperhatikan interval pemberian pada antigen yang sama.
+   - HB-0: tanggal pemberian tidak boleh lebih dari 1 hari (24 jam) setelah tanggal lahir (data hanya mencatat tanggal).
+   - Interval: dosis dengan jarak kurang dari ketentuan (INTERVAL_META) TIDAK dihitung sah.
+   PCV, Rotavirus, dan IPV 2 bukan syarat IDL Kemenkes (PCV 2 & RV 3 tetap indikator tersendiri). */
+const IDL_KEMENKES_KEYS = ["hb0", "bcg", "polio1", "polio2", "polio3", "polio4", "dpt1", "dpt2", "dpt3", "ipv1", "mr1"];
+function isIdlKemenkes(rec) {
+  const birth = parseCompact(rec.tgl_lahir);
+  if (!birth) return false;
+  const givenOf = (k) => parseCompact(rec[k]);
+  for (const k of IDL_KEMENKES_KEYS) {
+    const g = givenOf(k);
+    if (!g) return false;
+    if (k === "hb0" && g > addDays(birth, 1)) return false; // HB-0 maks. 1 hari (24 jam) setelah lahir
+    if (g < birth) return false;
+    const iv = computeIntervalInfo(k, birth, givenOf, new Date(9999, 0, 1));
+    if (iv && iv.violation) return false;
+  }
+  return true;
+}
 function indicatorFlags(rec, today) {
   const c = completeness(rec, today);
   return {
-    idl: c.dasarDone === c.dasarTotal,
+    idl: isIdlKemenkes(rec),
     ibl: c.lanjutanDone === c.lanjutanTotal,
     mr1: !!parseCompact(rec.mr1),
     pcv2: !!parseCompact(rec.pcv2),
@@ -2813,7 +2834,7 @@ function indicatorMetadata() {
   const lbl = (keys) => keys.map((k) => (SCHEDULE.find((s) => s.key === k) || {}).label || k);
   return [
     { short: "IDL", nama: "Imunisasi Dasar Lengkap", target: "Surviving Infant (SI)",
-      kriteria: `Bayi yang SELURUH ${DASAR_KEYS.length} antigen dasar sudah tercatat tanggal pemberiannya: ${lbl(DASAR_KEYS).join(", ")}.` },
+      kriteria: `Bayi yang SELURUH ${IDL_KEMENKES_KEYS.length} dosis sesuai DO Kemenkes sudah tercatat: ${lbl(IDL_KEMENKES_KEYS).join(", ")}. HB-0 hanya sah bila diberikan paling lambat 1 hari (24 jam) setelah lahir, dan dosis dengan jarak pemberian kurang dari interval minimum tidak dihitung. PCV, Rotavirus, dan IPV 2 bukan syarat IDL.` },
     { short: "IBL", nama: "Imunisasi Baduta Lengkap", target: "Baduta 12–23 bulan",
       kriteria: `Bayi/baduta yang SELURUH ${LANJUTAN_KEYS.length} antigen lanjutan (booster) sudah tercatat: ${lbl(LANJUTAN_KEYS).join(", ")}.` },
     { short: "MR 1", nama: "Imunisasi MR 1", target: "Surviving Infant (SI)", kriteria: "Bayi yang tanggal pemberian MR 1 sudah terisi." },
@@ -2869,7 +2890,7 @@ function IndicatorDefinitionPanel() {
         </div>
         <p className="def-note">
           Penilaian UCI memakai sasaran yang sama dengan definisi di atas, yaitu bayi yang lahir pada tahun laporan − 1. Pemberian tiap antigen dihitung sah bila
-          sesuai usia sasaran saat diberikan dan menjaga interval antar dosis pada antigen yang sama.
+          sesuai usia sasaran saat diberikan dan menjaga interval antar dosis pada antigen yang sama. Pada tabel ini HB-0 dinilai sah bila diberikan paling lambat 1 hari (24 jam) setelah lahir.
         </p>
 
         <h3>Rumus</h3>
@@ -5225,6 +5246,8 @@ function KendaliRingkasanDinas({ recordsByPkm, pusdatinMap, pf, today }) {
           <summary>ℹ️ Definisi operasional tabel kendali</summary>
           <div className="def-body">
             <ul>
+              <li><b>Sasaran IDL</b> = bayi yang harus diimunisasi dan mendapatkan IDL (Imunisasi Dasar Lengkap) pada tahun laporan, yaitu bayi yang lahir pada periode <b>1 Januari s/d 31 Desember tahun sebelumnya</b>. Laporan 2026 → bayi lahir 2025; laporan 2027 → bayi lahir 2026; dan seterusnya.</li>
+              <li><b>Target UCI Desa/Kelurahan</b> 100% pada tahun 2026. Desa/Kelurahan dinyatakan UCI bila <b>100% bayi</b> di wilayah tersebut mendapat imunisasi dasar lengkap: HB &lt; 24 jam 1 kali, BCG 1 kali, Polio 4 kali, DPT-HB/DPT-HB-Hib 3 kali, IPV 1 kali, dan MR 1 kali, dengan memperhatikan usia sasaran dan interval pemberian pada antigen yang sama.</li>
               <li><b>Sasaran Riil</b> = bayi aktif (bukan dropout) pada data basis Puskesmas yang lahir pada tahun laporan − 1.</li>
               <li><b>Sudah</b> = sasaran yang tanggal pemberian antigen terpilih sudah terisi sampai akhir periode. <b>Belum</b> = Sasaran Riil − Sudah.</li>
               <li><b>Terlambat</b> = sasaran yang belum mendapat antigen terpilih dan sudah melewati jatuh tempo jadwalnya (hanya tampil bila satu antigen dipilih).</li>
@@ -12983,7 +13006,7 @@ function LaporanUnduhView({ records, today, pkmLabel, showPkm }) {
       const g = groups.get(k);
       if (r._dropout) g.drop++; else if (String(r.jk).toUpperCase() === "L") g.L++; else if (String(r.jk).toUpperCase() === "P") g.P++; else g.L += 0;
       SCHEDULE.forEach((s, i) => { if (given(r, s.key)) g.ag[i]++; });
-      if (DASAR_KEYS.every((k2) => given(r, k2))) g.idl++;
+      if (isIdlKemenkes(r)) g.idl++;
       if (LANJUTAN_KEYS.every((k2) => given(r, k2))) g.ibl++;
     });
     /* sasaran aktif total termasuk jk tak terisi */
