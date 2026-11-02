@@ -2849,6 +2849,29 @@ function IndicatorDefinitionPanel() {
           (sama dengan dasar target Surviving Infant). Indikator IBL (Baduta) tidak memakai kohort ini.
         </p>
 
+        <h3>Definisi Operasional Kemenkes: UCI Desa/Kelurahan</h3>
+        <ul>
+          <li><b>Target:</b> UCI Desa/Kelurahan 100% pada tahun 2026.</li>
+          <li><b>Indikator UCI:</b> suatu Desa/Kelurahan dinyatakan UCI bila <b>100% bayi</b> di desa/kelurahan tersebut mendapat <b>imunisasi dasar lengkap</b>, dengan memperhatikan <b>usia sasaran</b> dan <b>interval pemberian pada antigen yang sama</b>.</li>
+        </ul>
+        <div className="table-wrap" style={{ marginTop: 8 }}>
+          <table className="table small def-table">
+            <thead><tr><th>Imunisasi dasar lengkap meliputi</th><th>Jumlah pemberian</th></tr></thead>
+            <tbody>
+              <tr><td className="name-cell">HB (Hepatitis B) &lt; 24 jam</td><td>1 kali (HB-0, diberikan kurang dari 24 jam setelah lahir)</td></tr>
+              <tr><td className="name-cell">BCG</td><td>1 kali</td></tr>
+              <tr><td className="name-cell">Polio</td><td>4 kali</td></tr>
+              <tr><td className="name-cell">DPT-HB / DPT-HB-Hib</td><td>3 kali</td></tr>
+              <tr><td className="name-cell">IPV</td><td>1 kali</td></tr>
+              <tr><td className="name-cell">MR (Measles Rubella)</td><td>1 kali</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="def-note">
+          Penilaian UCI memakai sasaran yang sama dengan definisi di atas, yaitu bayi yang lahir pada tahun laporan − 1. Pemberian tiap antigen dihitung sah bila
+          sesuai usia sasaran saat diberikan dan menjaga interval antar dosis pada antigen yang sama.
+        </p>
+
         <h3>Rumus</h3>
         <ul>
           <li><b>Sasaran Riil (L / P / Total)</b> = jumlah bayi <i>aktif</i> (bukan dropout) pada data basis Puskesmas di wilayah tersebut yang <i>lahir pada tahun laporan − 1</i>, dipecah menurut jenis kelamin; Total = L + P.</li>
@@ -3495,6 +3518,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [editingId, setEditingId] = useState(null);
+  const [editBack, setEditBack] = useState(null); /* view tujuan setelah simpan/batal edit; "dropout-bnba" bila edit dibuka dari Laporan Dropout */
   const [toast, setToast] = useState("");
   const [role, setRole] = useState("admin");
   const [assignedPosy, setAssignedPosy] = useState("");
@@ -3928,7 +3952,8 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
     persist(next);
     setEditingId(null);
     setSelectedId(rec.id);
-    setView("detail");
+    const back = editBack; setEditBack(null);
+    setView(back || "detail");
   }
   /* Mutasi sasaran: lihat penjelasan jenis di MUTASI_JENIS. */
   async function handleSaveMutasi(rec, mut) {
@@ -4062,6 +4087,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
           onClick={() => {
             const nextNo = Math.max(0, ...records.map((r) => Number(r.no) || 0)) + 1;
             setEditingId(null);
+            setEditBack(null);
             const empty = emptyRecord(nextNo);
             setEditingId(empty.id);
             setRecords((prev) => [...prev, empty]);
@@ -4140,6 +4166,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
               setView("detail");
             }}
             onEdit={(id) => {
+              setEditBack(null);
               setEditingId(id);
               setSelectedId(id);
               setView("edit");
@@ -4174,7 +4201,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
             }}
           />
         )}
-        {view === "dropout-bnba" && <DropoutBnbaReport records={dropoutScope} today={today} pkmLabel={pkm} />}
+        {view === "dropout-bnba" && <DropoutBnbaReport records={dropoutScope} today={today} pkmLabel={pkm} onEdit={(id) => { setEditBack("dropout-bnba"); setEditingId(id); setSelectedId(id); setView("edit"); }} />}
         {view === "mutasi" && !isOperator && (
           <MutasiSasaranView masuk={mutasiMasuk} keluar={mutasiKeluar} pkm={pkm} busyId={mutasiBusy} onSetujui={handleSetujuiMutasi} onTolak={handleTolakMutasi} onRefresh={refreshMutasi} />
         )}
@@ -4195,6 +4222,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
             today={today}
             onBack={() => setView("list")}
             onEdit={() => {
+              setEditBack(null);
               setEditingId(selected.id);
               setView("edit");
             }}
@@ -4209,7 +4237,8 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
                 setRecords((prev) => prev.filter((r) => r.id !== editing.id));
               }
               setEditingId(null);
-              setView(selected ? "detail" : "list");
+              const back = editBack; setEditBack(null);
+              setView(back || (selected ? "detail" : "list"));
             }}
             onSave={handleSave}
             currentPkm={pkm}
@@ -12651,7 +12680,7 @@ function MutasiSasaranView({ masuk, keluar, pkm, busyId, onSetujui, onTolak, onR
   );
 }
 
-function DropoutBnbaReport({ records, today, pkmLabel, showPkm }) {
+function DropoutBnbaReport({ records, today, pkmLabel, showPkm, onEdit }) {
   const [alasan, setAlasan] = useState("Semua");
   const [pkmF, setPkmF] = useState("Semua");
   const [q, setQ] = useState("");
@@ -12691,7 +12720,7 @@ function DropoutBnbaReport({ records, today, pkmLabel, showPkm }) {
     });
     XLSX.writeFile(wb, `${fileBase}.xlsx`);
   }
-  const colCount = header.length;
+  const colCount = header.length + (onEdit ? 1 : 0);
   /* type: num (angka urut, tengah) | text (rata kiri) | code (NIK/KK/tanggal, tengah, mono) | pill (badge) */
   const colDefs = [
     { key: "no", label: "No", w: 52, type: "num" },
@@ -12710,8 +12739,8 @@ function DropoutBnbaReport({ records, today, pkmLabel, showPkm }) {
     { key: "alasan", label: "Alasan Dropout", w: 190, type: "pill" },
     { key: "tgldo", label: "Tgl Dropout", w: 100, type: "code" },
     { key: "ket", label: "Keterangan", w: 220, type: "text" },
+    ...(onEdit ? [{ key: "aksi", label: "Aksi", w: 84, type: "num" }] : []),
   ];
-
   return (
     <div>
       <div className="page-head">
@@ -12775,7 +12804,7 @@ function DropoutBnbaReport({ records, today, pkmLabel, showPkm }) {
           <thead>
             <tr>
               {colDefs.map((c, ci) => (
-                <th key={c.key} className={`dc-${c.type}${ci === 0 ? " dc-stick-no" : ""}${c.key === "nama" ? " dc-stick-nama" : ""}`}>{c.label}</th>
+                <th key={c.key} className={`dc-${c.type}${ci === 0 ? " dc-stick-no" : ""}${c.key === "nama" ? " dc-stick-nama" : ""}${c.key === "aksi" ? " no-print" : ""}`}>{c.label}</th>
               ))}
             </tr>
           </thead>
@@ -12806,6 +12835,11 @@ function DropoutBnbaReport({ records, today, pkmLabel, showPkm }) {
                           }
                           return <td key={ci} className={cls}>{c === "" || c == null ? <span className="dc-empty">-</span> : c}</td>;
                         })}
+                        {onEdit && (
+                          <td className="dc-num no-print">
+                            <button className="btn-secondary edit-inline-btn" onClick={() => onEdit(x.r.id)} title={`Edit data ${x.r.nama || "sasaran"}`} aria-label={`Edit ${x.r.nama || "sasaran"}`}>Edit</button>
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
