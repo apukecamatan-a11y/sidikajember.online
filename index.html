@@ -2361,6 +2361,16 @@ function attachImportTargets(recs, { fallbackPkm = null, requireMatch = false } 
     return { ...r, _targetPkm: targetPkm, _targetSlug: targetPkm ? slugifyPkm(targetPkm) : null };
   });
 }
+/* Tujuan impor untuk Akun Dinas (wizard Impor Data Basis):
+   forcePkm diisi  -> SEMUA baris diarahkan ke Puskesmas itu (kolom PKM pada file diabaikan).
+   forcePkm kosong -> setiap baris wajib punya kolom PKM yang cocok dengan salah satu dari 50 Puskesmas. */
+function resolveImportTargets(recs, forcePkm) {
+  if (forcePkm) {
+    const slug = slugifyPkm(forcePkm);
+    return recs.map((r) => ({ ...r, _targetPkm: forcePkm, _targetSlug: slug }));
+  }
+  return attachImportTargets(recs, { requireMatch: true });
+}
 function statusRingkas(catDef, rec) {
   if (catDef.key === "balita") {
     const done = ["pcv3", "dpt4", "mr2"].filter((k) => rec[k]).length;
@@ -5053,9 +5063,7 @@ function DinasView({ onBack, onSwitchAccount }) {
             ["dropout-bnba", "📤 Sasaran Dropout (BNBA)"],
             ["mutasi-dinas", "🔁 Pantauan Mutasi Sasaran"],
             ["sasaran-desa", "Rekap Target Sasaran per Desa"],
-            ["import-bayi", "Impor Data Basis Sasaran"],
-            ["import-wus", "Impor Data WUS"],
-            ["import-bumil", "Impor Data Ibu Hamil"],
+            ["import-data", "Impor Data Basis"],
             ["helpdesk", "📚 Helpdesk & Modul"],
             ["akun", "Kelola Akun & Akses"],
             ["basis", "⚙️ Generate Data Basis"],
@@ -5203,26 +5211,7 @@ function DinasView({ onBack, onSwitchAccount }) {
         {dinasTab === "sasaran-desa" && <SasaranDesaDinasView />}
         {dinasTab === "helpdesk" && <HelpdeskDinasView />}
 
-        {dinasTab === "import-bayi" && (
-          <>
-            {bulkImportMsg.bayi && <div className="panel-note" style={{ marginBottom: 10 }}>{bulkImportMsg.bayi}</div>}
-            <ImportView pkm={DINAS_LABEL} superAdmin onImport={handleBulkImport("bayi", "Basis Sasaran")} />
-          </>
-        )}
-
-        {dinasTab === "import-wus" && (
-          <>
-            {bulkImportMsg.wus && <div className="panel-note" style={{ marginBottom: 10 }}>{bulkImportMsg.wus}</div>}
-            <GenericImportView catDef={CATEGORY_DEFS.wus} pkm={DINAS_LABEL} superAdmin onImport={handleBulkImport("wus", "WUS")} />
-          </>
-        )}
-
-        {dinasTab === "import-bumil" && (
-          <>
-            {bulkImportMsg.bumil && <div className="panel-note" style={{ marginBottom: 10 }}>{bulkImportMsg.bumil}</div>}
-            <GenericImportView catDef={CATEGORY_DEFS.bumil} pkm={DINAS_LABEL} superAdmin onImport={handleBulkImport("bumil", "Ibu Hamil")} />
-          </>
-        )}
+        {dinasTab === "import-data" && <DinasImportWizard pkmLabel={DINAS_LABEL} makeHandler={handleBulkImport} />}
 
         {dinasTab === "akun" && (
           <>
@@ -5841,7 +5830,7 @@ function SasaranDesaTargetImportModal({ onClose, onSaved }) {
       try {
         let table;
         if (isCsv) {
-          table = Papa.parse(ev.target.result.trim(), { skipEmptyLines: true }).data;
+          table = Papa.parse(String(ev.target.result).replace(/^\uFEFF/, "").trim(), { skipEmptyLines: true }).data;
         } else {
           const wb = XLSX.read(ev.target.result, { type: "array", cellDates: true });
           const ws = wb.Sheets[wb.SheetNames[0]];
@@ -9135,7 +9124,7 @@ async function importMergeAndSave(key, newRows, mergeFn) {
    WAJIB memiliki kolom PKM yang cocok dengan salah satu dari 50 Puskesmas, lalu komponen ini langsung
    menuliskan data ke storage Puskesmas tujuan masing-masing (tanpa melalui state records akun yang
    sedang login, karena Admin Dinas tidak punya data basis sendiri). */
-function GenericImportView({ catDef, pkm, onImport, superAdmin }) {
+function GenericImportView({ catDef, pkm, onImport, superAdmin, forcePkm }) {
   const [fileName, setFileName] = useState("");
   const [parsed, setParsed] = useState(null);
   const [mode, setMode] = useState("append");
@@ -9145,8 +9134,10 @@ function GenericImportView({ catDef, pkm, onImport, superAdmin }) {
   const allFields = [...catDef.identityFields, ...catDef.serviceFields];
 
   function handleFile(e) {
-    const file = e.target.files[0];
+    const input = e.target;
+    const file = input.files[0];
     if (!file) return;
+    input.value = ""; // agar file yang sama (setelah diperbaiki di Excel) bisa dipilih ulang dan tetap memicu pembacaan
     setFileName(file.name);
     setError("");
     setParsed(null);
@@ -9154,17 +9145,18 @@ function GenericImportView({ catDef, pkm, onImport, superAdmin }) {
     if (isCsv) {
       const reader = new FileReader();
       reader.onload = (ev) => {
-        const result = Papa.parse(ev.target.result.trim(), { skipEmptyLines: true });
+        const result = Papa.parse(String(ev.target.result).replace(/^\uFEFF/, "").trim(), { skipEmptyLines: true });
         const rows = result.data;
         if (!rows.length) {
           setError("File CSV kosong atau tidak terbaca.");
           return;
         }
         let recs = genericRowsToRecords(rows[0], rows.slice(1), 1, allFields);
-        if (superAdmin) recs = attachImportTargets(recs, { requireMatch: true });
+        if (superAdmin) recs = resolveImportTargets(recs, forcePkm);
         if (!recs.length) setError("Tidak ada baris data yang cocok — pastikan header sesuai template.");
         setParsed(recs);
       };
+      reader.onerror = () => setError("File tidak dapat dibaca. Coba pilih ulang file tersebut.");
       reader.readAsText(file);
     } else {
       const reader = new FileReader();
@@ -9178,13 +9170,14 @@ function GenericImportView({ catDef, pkm, onImport, superAdmin }) {
             return;
           }
           let recs = genericRowsToRecords(rows[0], rows.slice(1), 1, allFields);
-          if (superAdmin) recs = attachImportTargets(recs, { requireMatch: true });
+          if (superAdmin) recs = resolveImportTargets(recs, forcePkm);
           if (!recs.length) setError("Tidak ada baris data yang cocok — pastikan header sesuai template.");
           setParsed(recs);
         } catch (err) {
           setError("Gagal membaca file Excel: " + err.message);
         }
       };
+      reader.onerror = () => setError("File tidak dapat dibaca. Coba pilih ulang file tersebut.");
       reader.readAsArrayBuffer(file);
     }
   }
@@ -9681,7 +9674,7 @@ function mergeGenericImportRows(existing, importedRows, catDef) {
   return { merged: list, addedNew, completedRecords, completedFields };
 }
 
-function ImportView({ pkm, onImport, superAdmin }) {
+function ImportView({ pkm, onImport, superAdmin, forcePkm }) {
   const [fileName, setFileName] = useState("");
   const [parsed, setParsed] = useState(null);
   const [mode, setMode] = useState("append");
@@ -9690,12 +9683,15 @@ function ImportView({ pkm, onImport, superAdmin }) {
   const [progress, setProgress] = useState("");
 
   function attachTargetPkm(recs) {
+    if (superAdmin && forcePkm) return resolveImportTargets(recs, forcePkm);
     return attachImportTargets(recs, superAdmin ? { requireMatch: true } : { fallbackPkm: pkm });
   }
 
   function handleFile(e) {
-    const file = e.target.files[0];
+    const input = e.target;
+    const file = input.files[0];
     if (!file) return;
+    input.value = ""; // agar file yang sama (setelah diperbaiki di Excel) bisa dipilih ulang dan tetap memicu pembacaan
     setFileName(file.name);
     setError("");
     setParsed(null);
@@ -9703,7 +9699,7 @@ function ImportView({ pkm, onImport, superAdmin }) {
     if (isCsv) {
       const reader = new FileReader();
       reader.onload = (ev) => {
-        const result = Papa.parse(ev.target.result.trim(), { skipEmptyLines: true });
+        const result = Papa.parse(String(ev.target.result).replace(/^\uFEFF/, "").trim(), { skipEmptyLines: true });
         const rows = result.data;
         if (!rows.length) {
           setError("File CSV kosong atau tidak terbaca.");
@@ -9714,6 +9710,7 @@ function ImportView({ pkm, onImport, superAdmin }) {
         if (!recs.length) setError("Tidak ada baris data yang cocok — pastikan header sesuai template.");
         setParsed(attachTargetPkm(recs));
       };
+      reader.onerror = () => setError("File tidak dapat dibaca. Coba pilih ulang file tersebut.");
       reader.readAsText(file);
     } else {
       const reader = new FileReader();
@@ -9734,6 +9731,7 @@ function ImportView({ pkm, onImport, superAdmin }) {
           setError("Gagal membaca file Excel: " + err.message);
         }
       };
+      reader.onerror = () => setError("File tidak dapat dibaca. Coba pilih ulang file tersebut.");
       reader.readAsArrayBuffer(file);
     }
   }
@@ -9940,6 +9938,176 @@ function ImportView({ pkm, onImport, superAdmin }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ---------- Wizard Impor Data Basis (khusus Akun Dinas) ----------
+   Menggantikan 3 menu terpisah (Impor Data Basis Sasaran / WUS / Ibu Hamil) menjadi 1 menu dengan 3 langkah:
+   1) Pilih data basis  2) Atur impor (Puskesmas tujuan + cara impor)  3) Unggah & periksa.
+   Proses baca file, pratinjau, dan penyimpanan tetap memakai ImportView / GenericImportView yang lama
+   (termasuk pengaman data importMergeAndSave), sehingga logika simpan tidak berubah. */
+const IMPORT_WIZARD_CATS = [
+  { key: "bayi", icon: "👶", title: "Basis Sasaran (Bayi)", short: "Basis Sasaran", desc: "Data bayi beserta riwayat imunisasi dasar dan lanjutan." },
+  { key: "wus", icon: "👩", title: "WUS", short: "WUS", desc: "Wanita Usia Subur beserta status imunisasi TT." },
+  { key: "bumil", icon: "🤰", title: "Ibu Hamil", short: "Ibu Hamil", desc: "Ibu hamil beserta kunjungan ANC (K1–K6) dan tablet Fe." },
+];
+const IMPORT_WIZARD_STEPS = ["Pilih data basis", "Atur impor", "Unggah & periksa"];
+
+function DinasImportWizard({ pkmLabel, makeHandler }) {
+  const [step, setStep] = useState(1);
+  const [maxStep, setMaxStep] = useState(1);
+  const [cat, setCat] = useState(null);
+  const [destMode, setDestMode] = useState("auto");
+  const [destPkm, setDestPkm] = useState("");
+  const [doneMsg, setDoneMsg] = useState("");
+  const [viewKey, setViewKey] = useState(0);
+
+  const catInfo = IMPORT_WIZARD_CATS.find((c) => c.key === cat) || null;
+  const forcePkm = destMode === "single" && destPkm ? destPkm : null;
+  const step2Ready = destMode === "auto" || !!destPkm;
+
+  function pickCat(key) {
+    setCat(key);
+    setDoneMsg("");
+    setStep(2);
+    setMaxStep(2);
+  }
+  function goStep(n) {
+    if (n > maxStep) return;
+    if (n !== 3) setDoneMsg("");
+    setStep(n);
+  }
+  function goNext() {
+    setStep(3);
+    setMaxStep(3);
+  }
+
+  const stepTitle =
+    step === 1 ? "Data basis apa yang ingin Anda impor?"
+      : step === 2 ? `Data ${catInfo ? catInfo.short : ""} masuk ke Puskesmas mana?`
+        : `Unggah file ${catInfo ? catInfo.short : ""}`;
+  const stepDesc =
+    step === 1 ? "Pilih satu kategori. Langkah berikutnya otomatis terbuka."
+      : step === 2 ? "Pilih tujuan Puskesmas, lalu lanjut mengunggah file."
+        : "Unduh template (bila perlu), unggah file, periksa pratinjau, lalu simpan. Tidak ada data tersimpan sebelum Anda menekan Simpan.";
+
+  return (
+    <div className="iw">
+      <div className="iw-eyebrow">Akun Dinas · Impor Massal</div>
+      <h1 className="iw-title">Impor Data Basis</h1>
+
+      <div className="iw-steps">
+        {IMPORT_WIZARD_STEPS.map((label, i) => {
+          const n = i + 1;
+          return (
+            <button
+              key={n}
+              type="button"
+              className={"iw-step" + (step === n ? " active" : "")}
+              disabled={n > maxStep}
+              onClick={() => goStep(n)}
+            >
+              {step > n ? "✓" : n} · {label}
+            </button>
+          );
+        })}
+      </div>
+
+      <h2 className="iw-question">{stepTitle}</h2>
+      <p className="iw-desc">{stepDesc}</p>
+
+      {step === 1 && (
+        <div className="iw-choices">
+          {IMPORT_WIZARD_CATS.map((c) => (
+            <button
+              key={c.key}
+              type="button"
+              className={"iw-choice" + (cat === c.key ? " selected" : "")}
+              onClick={() => pickCat(c.key)}
+            >
+              <span className="iw-choice-icon">{c.icon}</span>
+              <span className="iw-choice-title">{c.title}</span>
+              <span className="iw-choice-desc">{c.desc}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {step === 2 && catInfo && (
+        <div>
+          <div className="iw-group-label">Puskesmas tujuan</div>
+          <div className="iw-options">
+            <button type="button" className={"iw-option" + (destMode === "auto" ? " selected" : "")} onClick={() => setDestMode("auto")}>
+              <span className="iw-radio" />
+              <span>
+                <span className="iw-option-title">Sesuai kolom PKM pada file</span>
+                <span className="iw-option-desc">Untuk file gabungan banyak Puskesmas. Setiap baris perlu kolom PKM; baris yang tidak dikenali dilewati.</span>
+              </span>
+            </button>
+            <button type="button" className={"iw-option" + (destMode === "single" ? " selected" : "")} onClick={() => setDestMode("single")}>
+              <span className="iw-radio" />
+              <span>
+                <span className="iw-option-title">Semua ke satu Puskesmas</span>
+                <span className="iw-option-desc">Semua baris masuk ke Puskesmas pilihan Anda; kolom PKM pada file diabaikan.</span>
+              </span>
+            </button>
+          </div>
+          {destMode === "single" && (
+            <select className="select iw-select" value={destPkm} onChange={(e) => setDestPkm(e.target.value)}>
+              <option value="">— Pilih Puskesmas —</option>
+              {PKM_LIST.map((name) => (<option key={name} value={name}>{name}</option>))}
+            </select>
+          )}
+
+          <div className="iw-safe">
+            <span>🛡️</span>
+            <span>
+              <b>Aman:</b> impor hanya menambah data baru dan melengkapi kolom yang kosong. Data lama tidak ditimpa atau dihapus,
+              dan baris yang sama (nama, tanggal lahir, posyandu) tidak digandakan.
+            </span>
+          </div>
+
+          <div className="iw-actions">
+            <button type="button" className="btn-secondary" onClick={() => goStep(1)}>← Kembali</button>
+            <button type="button" className="btn-primary" disabled={!step2Ready} onClick={goNext}>Lanjut: unggah file →</button>
+          </div>
+        </div>
+      )}
+
+      {step === 3 && catInfo && (() => {
+        const baseHandler = makeHandler(catInfo.key, catInfo.short);
+        const onImport = (newRecs, mode, extraNote) => {
+          baseHandler(newRecs, mode, extraNote);
+          setDoneMsg(extraNote || `Impor data ${catInfo.short} selesai.`);
+        };
+        const viewKeyStr = catInfo.key + ":" + (forcePkm || "auto") + ":" + viewKey;
+        return (
+          <div>
+            <div className="iw-summary">
+              <span className="iw-chip">Data basis: <b>{catInfo.title}</b></span>
+              <span className="iw-chip">Tujuan: <b>{forcePkm ? forcePkm : "sesuai kolom PKM pada file"}</b></span>
+              <button type="button" className="iw-link" onClick={() => goStep(1)}>Ganti kategori</button>
+              <button type="button" className="iw-link" onClick={() => goStep(2)}>Ubah tujuan</button>
+            </div>
+            <div className="panel-note iw-formatnote">
+              Format: .csv, .xlsx, .xls. Judul kolom boleh format template atau Excel Puskesmas asli.
+              {forcePkm ? "" : " Kolom PKM wajib terisi."}
+            </div>
+            {doneMsg && (
+              <div className="iw-done">
+                <div>✅ {doneMsg}</div>
+                <button type="button" className="btn-secondary" onClick={() => { setDoneMsg(""); setViewKey((k) => k + 1); }}>Impor file lain</button>
+              </div>
+            )}
+            {catInfo.key === "bayi" ? (
+              <ImportView key={viewKeyStr} pkm={pkmLabel} superAdmin forcePkm={forcePkm} onImport={onImport} />
+            ) : (
+              <GenericImportView key={viewKeyStr} catDef={CATEGORY_DEFS[catInfo.key]} pkm={pkmLabel} superAdmin forcePkm={forcePkm} onImport={onImport} />
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -13500,6 +13668,56 @@ h2 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 17px; margin: 
 .empty-cell { text-align: left !important; }
 .table td, .table.dropout-table td.dc-code, .dinkes-table td { font-family: 'Inter', sans-serif; font-variant-numeric: tabular-nums; }
 .table td.name-cell { font-weight: 600; }
+
+/* ---------- Wizard Impor Data Basis (Akun Dinas) — memakai palet tema aplikasi ---------- */
+.iw { padding: 0; color: var(--ink); }
+.iw .iw-eyebrow { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; font-weight: 600; color: var(--gold); margin-bottom: 4px; }
+.iw .iw-title { font-family: 'Fraunces', serif; font-weight: 600; font-size: 30px; line-height: 1.15; margin: 0 0 16px; color: var(--ink); }
+.iw .iw-steps { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+.iw .iw-step { font-family: 'Inter', sans-serif; font-size: 12.5px; font-weight: 600; padding: 8px 14px; border-radius: 20px; border: 1px solid var(--line); cursor: pointer; background: transparent; color: var(--ink-soft); }
+.iw .iw-step:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.iw .iw-step.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.iw .iw-step:disabled { cursor: not-allowed; opacity: .6; }
+.iw .iw-question { font-family: 'Fraunces', serif; font-weight: 600; font-size: 20px; color: var(--ink); margin: 0 0 6px; }
+.iw .iw-desc { font-size: 13px; color: var(--ink-soft); margin: 0 0 18px; line-height: 1.5; }
+.iw .iw-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+.iw .iw-choice { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 18px; border-radius: 14px; cursor: pointer; background: var(--panel); border: 1px solid var(--line); color: var(--ink); font-family: 'Inter', sans-serif; transition: border-color .15s, transform .15s, box-shadow .15s; box-shadow: 0 10px 26px -18px rgba(62,42,56,.28); }
+.iw .iw-choice:hover { border-color: var(--primary); background: var(--primary-soft); transform: translateY(-1px); }
+.iw .iw-choice.selected { border-color: var(--primary); background: var(--primary-soft); }
+.iw .iw-choice-icon { font-size: 26px; line-height: 1; }
+.iw .iw-choice-title { font-size: 15px; font-weight: 700; color: var(--ink); }
+.iw .iw-choice-desc { font-size: 12.5px; color: var(--ink-soft); line-height: 1.45; }
+.iw .iw-group-label { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; font-weight: 600; color: var(--ink-soft); margin-bottom: 8px; }
+.iw .iw-options { display: flex; flex-direction: column; gap: 10px; }
+.iw .iw-option { display: flex; align-items: flex-start; gap: 12px; text-align: left; padding: 14px 16px; border-radius: 12px; cursor: pointer; background: var(--panel); border: 1px solid var(--line); color: var(--ink); font-family: 'Inter', sans-serif; }
+.iw .iw-option:hover { border-color: var(--primary); }
+.iw .iw-option.selected { border-color: var(--primary); background: var(--primary-soft); }
+.iw .iw-option.static { cursor: default; }
+.iw .iw-radio { flex: none; width: 16px; height: 16px; margin-top: 2px; border-radius: 50%; border: 2px solid #D9B5C5; position: relative; }
+.iw .iw-option.selected .iw-radio { border-color: var(--primary); }
+.iw .iw-option.selected .iw-radio::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--primary); }
+.iw .iw-option-title { display: block; font-size: 14px; font-weight: 700; color: var(--ink); margin-bottom: 3px; }
+.iw .iw-option-desc { display: block; font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
+.iw .iw-select { width: 100%; max-width: 360px; margin-top: 10px; }
+.iw .iw-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+.iw .iw-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.iw .iw-chip { font-size: 12px; padding: 6px 12px; border-radius: 999px; background: var(--primary-soft); color: var(--ink-soft); }
+.iw .iw-chip b { color: var(--primary-dark); font-weight: 700; }
+.iw .iw-link { background: none; border: none; color: var(--primary); font-weight: 700; font-size: 12.5px; cursor: pointer; text-decoration: underline; padding: 4px; }
+.iw .iw-formatnote { margin: 0 0 14px; }
+.iw .iw-safe { display: flex; gap: 10px; align-items: flex-start; margin-top: 20px; padding: 12px 14px; border-radius: 12px; background: var(--mint-soft); border: 1px solid #BFE3D6; color: #2F6B58; font-size: 12.5px; line-height: 1.5; }
+.iw .iw-safe b { color: #1F5444; }
+.iw input[type="file"].input { border: 2px dashed #E3C3D0; background: #FFFAFC; padding: 22px 16px; text-align: center; border-radius: 14px; width: 100%; cursor: pointer; box-sizing: border-box; }
+.iw input[type="file"].input:hover { border-color: var(--primary); background: var(--primary-soft); }
+.iw .iw-done { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; margin-bottom: 14px; border-radius: 12px; background: var(--mint-soft); border: 1px solid #BFE3D6; color: #2F6B58; font-size: 13px; }
+/* Komponen impor lama di dalam wizard: biarkan memakai gaya standar aplikasi, hanya sembunyikan judul & catatan panjang */
+.iw .page-head { justify-content: flex-start; margin-bottom: 14px; }
+.iw .page-head > div:first-child { display: none; }
+.iw .panel-head > .panel-note { display: none !important; }
+@media (max-width: 640px) {
+  .iw .iw-title { font-size: 26px; }
+  .iw .iw-question { font-size: 18px; }
+}
 `;
 
 </script>
