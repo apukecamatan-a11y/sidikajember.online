@@ -1888,6 +1888,14 @@ function achievementLabel(pct) {
 }
 function AchievementBadge({ pct }) {
   if (pct === null || pct === undefined) return <span>—</span>;
+  if (pct > BATAS_CAPAIAN) {
+    // Capaian tidak boleh melebihi 100%: tandai sebagai kesalahan data/target (rincian ada di panel "Evaluasi Kewajaran Capaian").
+    return (
+      <span className="achv-badge achv-over" title={`Melebihi batas ${BATAS_CAPAIAN}% — periksa panel Evaluasi Kewajaran Capaian di atas tabel`}>
+        ⚠ {pct}%
+      </span>
+    );
+  }
   const c = achievementColor(pct);
   return (
     <span className="achv-badge" style={{ color: c, background: c.replace("rgb", "rgba").replace(")", ",.14)") }}>
@@ -2469,6 +2477,98 @@ function indicatorFlags(rec, today) {
    lahir 1 Jan s/d 31 Des tahun T-1. Tahun laporan = tahun tanggal akhir periode (cumEnd) yang dipilih.
    Dipakai untuk Sasaran Riil serta Capaian indikator berbasis Surviving Infant (IDL, MR 1, PCV 2, RV 3).
    IBL (Baduta) tidak memakai kohort ini. */
+/* ---------- Evaluasi kewajaran capaian: batas 100% ----------
+   Capaian imunisasi tidak mungkin melebihi 100%. Bila % Pusdatin atau % Riil > 100, sistem menandainya sebagai
+   temuan kesalahan, menjelaskan kemungkinan penyebab berdasarkan angka yang ada, dan mengarahkan tindakan perbaikan. */
+const BATAS_CAPAIAN = 100;
+function numT(v) { return v && typeof v === "object" ? Number(v.T) || 0 : Number(v) || 0; }
+/* Jumlah baris yang kemungkinan data ganda (nama + tanggal lahir + nama ibu sama) di antara bayi aktif. */
+function countDuplicateBayi(list) {
+  const seen = new Set();
+  let dup = 0;
+  (list || []).forEach((r) => {
+    const nm = String(r.nama || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const tl = String(r.tgl_lahir || "");
+    const ib = String(r.ibu || "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!nm || !tl) return;
+    const k = nm + "|" + tl + "|" + ib;
+    if (seen.has(k)) dup++; else seen.add(k);
+  });
+  return dup;
+}
+/* entry = { label, dup, indicators } — kembalikan daftar temuan (kosong bila wajar). */
+function diagnoseCapaian(entry) {
+  const issues = [];
+  (entry.indicators || []).forEach((ind, i) => {
+    const def = INDICATOR_DEFS[i] || { short: ind.key };
+    const target = numT(ind.pusdatinTarget), sasaran = numT(ind.sasaranRiil), c = ind.capaian || 0;
+    const base = { wilayah: entry.label, indikator: def.short, capaian: c, target, sasaran };
+    if (ind.pctRiil !== null && ind.pctRiil !== undefined && ind.pctRiil > BATAS_CAPAIAN) {
+      issues.push({ ...base, jenis: "riil", pct: ind.pctRiil,
+        sebab: `Capaian (${c}) lebih besar dari Sasaran Riil (${sasaran}). Ini seharusnya tidak mungkin karena capaian dihitung dari bayi sasaran yang sama.`,
+        tindakan: ["Periksa tanggal lahir bayi yang tidak wajar atau kosong pada data basis.", "Muat ulang data (tombol Muat Ulang) lalu cek kembali; bila tetap muncul, laporkan ke pengelola sistem."] });
+    }
+    if (ind.pctPusdatin !== null && ind.pctPusdatin !== undefined && ind.pctPusdatin > BATAS_CAPAIAN) {
+      const lebih = c - target;
+      const tindakan = [];
+      let sebab;
+      if (sasaran > target) {
+        sebab = `Bayi sasaran pada data basis (${sasaran}) lebih banyak dari Target Pusdatin (${target}), sehingga capaian (${c}) melampaui target sebanyak ${lebih}.`;
+        if (entry.dup > 0) tindakan.push(`Terdeteksi ${entry.dup} kemungkinan data ganda (nama, tanggal lahir, dan nama ibu sama). Periksa di menu Tabel Kendali Sasaran → Rincian per Bayi, lalu hapus duplikat di akun Puskesmas.`);
+        tindakan.push("Periksa bayi yang bukan warga wilayah (pindahan/luar wilayah) atau yang desanya salah catat.");
+        tindakan.push("Bila data basis sudah benar, perbarui target di menu Rekap Target Sasaran per Desa (Impor Target per Desa) atau Target Pusdatin per Puskesmas.");
+      } else {
+        sebab = `Capaian (${c}) melebihi Target Pusdatin (${target}) padahal bayi sasaran (${sasaran}) tidak melebihi target. Angka tidak konsisten.`;
+        tindakan.push("Periksa pencocokan desa pada data basis (nama desa harus sama dengan daftar resmi).");
+        tindakan.push("Periksa apakah target Pusdatin wilayah ini terisi benar.");
+      }
+      issues.push({ ...base, jenis: "pusdatin", pct: ind.pctPusdatin, sebab, tindakan });
+    }
+    if (c > 0 && target === 0 && (ind.pctPusdatin === null || ind.pctPusdatin === undefined)) {
+      issues.push({ ...base, jenis: "target-kosong", pct: null,
+        sebab: `Ada capaian (${c}) tetapi Target Pusdatin belum diisi/0, sehingga % Pusdatin tidak dapat dihitung.`,
+        tindakan: ["Isi target di menu Rekap Target Sasaran per Desa (Impor Target per Desa) atau Target Pusdatin per Puskesmas."] });
+    }
+  });
+  return issues;
+}
+function CapaianEvaluasiPanel({ entries }) {
+  const issues = [];
+  (entries || []).forEach((e) => diagnoseCapaian(e).forEach((x) => issues.push(x)));
+  const errors = issues.filter((x) => x.jenis !== "target-kosong");
+  const warns = issues.filter((x) => x.jenis === "target-kosong");
+  if (!issues.length) {
+    return (<div className="eval-panel eval-ok no-print">✅ <b>Evaluasi kewajaran capaian:</b> seluruh capaian berada dalam batas {BATAS_CAPAIAN}%.</div>);
+  }
+  const shown = errors.slice(0, 30);
+  return (
+    <div className={"eval-panel " + (errors.length ? "eval-bad" : "eval-warn") + " no-print"}>
+      <div className="eval-head">
+        {errors.length ? "⚠️" : "ℹ️"} <b>Evaluasi kewajaran capaian:</b>{" "}
+        {errors.length ? `${errors.length} temuan capaian melebihi batas ${BATAS_CAPAIAN}% — data perlu diperiksa.` : "tidak ada capaian di atas batas."}
+        {warns.length ? ` ${warns.length} wilayah/indikator belum memiliki target.` : ""}
+      </div>
+      <details open={errors.length > 0 && errors.length <= 5}>
+        <summary>Lihat rincian penyebab &amp; arahan perbaikan</summary>
+        <ol className="eval-list">
+          {shown.map((x, i) => (
+            <li key={i}>
+              <b>{x.wilayah}</b> — {x.indikator}: <b>{x.pct}%</b> ({x.jenis === "riil" ? "terhadap Sasaran Riil" : "terhadap Target Pusdatin"})
+              <div>{x.sebab}</div>
+              <ul>{x.tindakan.map((t, j) => (<li key={j}>{t}</li>))}</ul>
+            </li>
+          ))}
+        </ol>
+        {errors.length > shown.length && <div className="panel-note">…dan {errors.length - shown.length} temuan lainnya. Gunakan filter Puskesmas untuk melihat sisanya.</div>}
+        {warns.length > 0 && (
+          <div className="panel-note" style={{ marginTop: 6 }}>
+            Target belum terisi: {warns.slice(0, 12).map((x) => `${x.wilayah} (${x.indikator})`).join("; ")}{warns.length > 12 ? `; dan ${warns.length - 12} lainnya` : ""}.
+          </div>
+        )}
+      </details>
+    </div>
+  );
+}
 function sasaranBirthYear(today) { return today.getFullYear() - 1; }
 function isSasaranBirthYear(rec, today) {
   const b = parseCompact(rec.tgl_lahir);
@@ -2505,9 +2605,9 @@ function computeIndicator5Rows(recordsByPkm, pusdatinMap, today) {
         pctRiil: pctOrNull(c, COHORT_FREE_INDICATORS.includes(d.key) ? sasaranRiilSemua : sasaranRiil),
       };
     });
-    return { pkm: p, slug, sasaranRiil, sasaranRiilSemua, jumlahPenduduk: JUMLAH_PENDUDUK_MAP[slug] || 0, indicators };
+    return { pkm: p, slug, sasaranRiil, sasaranRiilSemua, dupCount: countDuplicateBayi(list.filter(notDropout)), jumlahPenduduk: JUMLAH_PENDUDUK_MAP[slug] || 0, indicators };
   });
-  const totalRow = { pkm: "Kabupaten Jember", slug: null, sasaranRiil: rows.reduce((s, r) => s + r.sasaranRiil, 0), sasaranRiilSemua: rows.reduce((s, r) => s + r.sasaranRiilSemua, 0), jumlahPenduduk: totalJumlahPenduduk() };
+  const totalRow = { pkm: "Kabupaten Jember", slug: null, sasaranRiil: rows.reduce((s, r) => s + r.sasaranRiil, 0), sasaranRiilSemua: rows.reduce((s, r) => s + r.sasaranRiilSemua, 0), dupCount: rows.reduce((s, r) => s + r.dupCount, 0), jumlahPenduduk: totalJumlahPenduduk() };
   totalRow.indicators = INDICATOR_DEFS.map((d, di) => {
     const target = rows.reduce((s, r) => s + (r.indicators[di].pusdatinTarget || 0), 0);
     const c = rows.reduce((s, r) => s + r.indicators[di].capaian, 0);
@@ -2579,7 +2679,7 @@ function computeIndicator5RowsByDesa(records, slug, today) {
         pctRiil: pctOrNull(c, COHORT_FREE_INDICATORS.includes(d.key) ? aktifSemua.length : sasaranRiil.T),
       };
     });
-    return { desa: label, sasaranRiil, sasaranRiilSemua: aktifSemua.length, indicators };
+    return { desa: label, sasaranRiil, sasaranRiilSemua: aktifSemua.length, dupCount: countDuplicateBayi(aktifSemua), indicators };
   }
 
   const rows = desaRows.map((d) => {
@@ -2782,7 +2882,7 @@ function IndicatorDefinitionPanel() {
           <li><b>Bayi dropout</b> dikeluarkan dari Sasaran Riil maupun Capaian, sehingga pembilang dan penyebut % Riil berasal dari kelompok bayi yang sama.</li>
           <li><b>Membaca IBL:</b> % Riil IBL memakai seluruh bayi aktif sebagai penyebut (termasuk yang belum berusia 12 bulan), sehingga cenderung lebih rendah. Acuan utama IBL adalah % Pusdatin terhadap target Baduta.</li>
           <li><b>Contoh angka di bawah</b> hanya ilustrasi rumus, bukan nilai yang pasti tampil di tabel.</li>
-          <li><b>Nilai di atas 100%</b> berarti bayi terdata/terimunisasi melebihi angka target Pusdatin, lazim terjadi bila target lebih kecil dari jumlah bayi sebenarnya (mis. sasaran dari desa lain atau pendatang).</li>
+          <li><b>Batas 100%:</b> capaian tidak boleh melebihi 100%. Bila % Pusdatin atau % Riil di atas 100%, sel ditandai ⚠ dan panel <i>Evaluasi Kewajaran Capaian</i> di atas tabel menjelaskan kemungkinan penyebab (data ganda, bayi di luar wilayah, target belum diperbarui, atau angka tidak konsisten) beserta arahan perbaikannya.</li>
         </ul>
 
         <h3>Skala Warna Capaian</h3>
@@ -2802,6 +2902,7 @@ function IndicatorDefinitionPanel() {
 function Indicator5ByDesaTable({ rows, totalRow }) {
   return (
     <div>
+    <CapaianEvaluasiPanel entries={[...rows, totalRow].map((r) => ({ label: r.desa, dup: r.dupCount, indicators: r.indicators }))} />
     <ReportChart
       title="Capaian 5 Indikator Utama per Desa/Kelurahan (% Sasaran Riil)"
       labels={rows.map((r) => r.desa)}
@@ -2886,6 +2987,10 @@ function Indicator5ByDesaTable({ rows, totalRow }) {
 function Indicator5ByDesaAllPkmTable({ pkmRows, grandTotalRow }) {
   return (
     <div>
+    <CapaianEvaluasiPanel entries={[
+      ...pkmRows.flatMap((g) => g.rows.map((r) => ({ label: `${g.pkm} — ${r.desa}`, dup: r.dupCount, indicators: r.indicators }))),
+      { label: grandTotalRow.desa, dup: pkmRows.reduce((x, g) => x + (g.totalRow.dupCount || 0), 0), indicators: grandTotalRow.indicators },
+    ]} />
     <ReportChart
       title="Capaian 5 Indikator Utama per Puskesmas — Rekap Desa/Kelurahan (% Sasaran Riil)"
       labels={pkmRows.map((g) => g.pkm)}
@@ -3269,6 +3374,7 @@ function Indicator5BreakdownModal({ indicator, ind5Rows, mode, onClose, hideExpo
 function Indicator5Table({ rows, totalRow, editable, pusdatinDraft, onDraftChange, onSaveTarget, savingSlug }) {
   return (
     <div>
+    <CapaianEvaluasiPanel entries={[...rows, totalRow].map((r) => ({ label: r.pkm, dup: r.dupCount, indicators: r.indicators }))} />
     <ReportChart
       title="Capaian 5 Indikator Utama per Puskesmas (% Sasaran Riil)"
       labels={rows.map((r) => r.pkm)}
@@ -4910,6 +5016,360 @@ function PublicRekapView({ onBack }) {
   );
 }
 
+/* ---------- Tabel Kendali Sasaran (Dinas) — 50 Puskesmas, dengan filter antigen ----------
+   Sasaran = bayi aktif (bukan dropout) yang lahir pada tahun laporan − 1 (definisi operasional sasaran IDL,
+   lihat sasaranBirthYear). Tahun laporan = tahun akhir periode yang dipilih pada filter periode.
+   Per antigen: Sudah = sasaran yang tanggal pemberian antigen tsb terisi (sampai akhir periode);
+   Belum = Sasaran Riil − Sudah; Terlambat = sasaran yang belum diberi dan sudah melewati jatuh tempo (status "overdue").
+   Target Pusdatin = Surviving Infant per Puskesmas yang diinput Dinas (indikator IDL). */
+function computeKendaliRows(recordsByPkm, pusdatinMap, today, antigens, withOverdue) {
+  const rows = PKM_LIST.map((p) => {
+    const slug = slugifyPkm(p);
+    const sasaran = (recordsByPkm[p] || []).filter((r) => notDropout(r) && isSasaranBirthYear(r, today));
+    const target = Number(((pusdatinMap || {})[slug] || {}).idl) || 0;
+    const per = antigens.map((a) => {
+      let sudah = 0, terlambat = 0;
+      sasaran.forEach((r) => {
+        const given = parseCompact(r[a.key]);
+        if (given) { sudah++; return; }
+        if (withOverdue) {
+          const st = computeItemStatus(parseCompact(r.tgl_lahir), null, a, today);
+          if (st && st.status === "overdue") terlambat++;
+        }
+      });
+      const belum = sasaran.length - sudah;
+      return { key: a.key, sudah, belum, terlambat, pctRiil: pctOrNull(sudah, sasaran.length), pctPusdatin: pctOrNull(sudah, target) };
+    });
+    return { pkm: p, slug, target, sasaran: sasaran.length, per };
+  });
+  const total = {
+    pkm: "TOTAL KABUPATEN", target: rows.reduce((x, r) => x + r.target, 0), sasaran: rows.reduce((x, r) => x + r.sasaran, 0),
+    per: antigens.map((a, i) => {
+      const sudah = rows.reduce((x, r) => x + r.per[i].sudah, 0);
+      const terlambat = rows.reduce((x, r) => x + r.per[i].terlambat, 0);
+      const sasaran = rows.reduce((x, r) => x + r.sasaran, 0);
+      const target = rows.reduce((x, r) => x + r.target, 0);
+      return { key: a.key, sudah, belum: sasaran - sudah, terlambat, pctRiil: pctOrNull(sudah, sasaran), pctPusdatin: pctOrNull(sudah, target) };
+    }),
+  };
+  return { rows, total };
+}
+
+function KendaliRingkasanDinas({ recordsByPkm, pusdatinMap, pf, today }) {
+  const [antigen, setAntigen] = useState("__dasar__");
+  const [sortBy, setSortBy] = useState("nama");
+  const [q, setQ] = useState("");
+  const cumEnd = pf.cumEnd;
+  const tahunLaporan = cumEnd.getFullYear();
+  const matrix = antigen.startsWith("__");
+  const antigens = useMemo(() => {
+    if (antigen === "__dasar__") return SCHEDULE.filter((s) => s.group === "dasar");
+    if (antigen === "__lanjutan__") return SCHEDULE.filter((s) => s.group === "lanjutan");
+    if (antigen === "__semua__") return SCHEDULE.slice();
+    return SCHEDULE.filter((s) => s.key === antigen);
+  }, [antigen]);
+  const { rows, total } = useMemo(
+    () => computeKendaliRows(recordsByPkm || {}, pusdatinMap, cumEnd, antigens, !matrix),
+    [recordsByPkm, pusdatinMap, cumEnd, antigens, matrix]
+  );
+  const shown = useMemo(() => {
+    let list = rows.filter((r) => !q.trim() || r.pkm.toLowerCase().includes(q.trim().toLowerCase()));
+    const v = (r) => (matrix ? (r.per.reduce((x, c) => x + (c.pctRiil === null ? 0 : c.pctRiil), 0) / (r.per.length || 1)) : (r.per[0].pctRiil === null ? -1 : r.per[0].pctRiil));
+    if (sortBy === "rendah") list = list.slice().sort((a, b) => v(a) - v(b));
+    else if (sortBy === "belum") list = list.slice().sort((a, b) => b.per[0].belum - a.per[0].belum);
+    else if (sortBy === "terlambat") list = list.slice().sort((a, b) => b.per[0].terlambat - a.per[0].terlambat);
+    return list;
+  }, [rows, q, sortBy, matrix]);
+  const a0 = antigens[0];
+  const judul = matrix ? (antigen === "__dasar__" ? "Seluruh Antigen Dasar" : antigen === "__lanjutan__" ? "Seluruh Antigen Lanjutan (Booster)" : "Seluruh Antigen") : a0.label;
+
+  function exportCsv() {
+    const head = matrix
+      ? ["Puskesmas", "Target Pusdatin (SI)", "Sasaran Riil", ...antigens.map((a) => `${a.label} - % Riil`)]
+      : ["Puskesmas", "Target Pusdatin (SI)", "Sasaran Riil", "Sudah", "Belum", "Terlambat", "% Pusdatin", "% Riil"];
+    const line = (r) => matrix
+      ? [r.pkm, r.target, r.sasaran, ...r.per.map((c) => (c.pctRiil === null ? "-" : c.pctRiil))]
+      : [r.pkm, r.target, r.sasaran, r.per[0].sudah, r.per[0].belum, r.per[0].terlambat, r.per[0].pctPusdatin === null ? "-" : r.per[0].pctPusdatin, r.per[0].pctRiil === null ? "-" : r.per[0].pctRiil];
+    downloadCSV(`tabel-kendali-sasaran-${matrix ? antigen.replace(/_/g, "") : antigen}-${tahunLaporan}.csv`, [head, ...shown.map(line), line(total)]);
+  }
+
+  return (
+    <div>
+      <div className="export-btn-row no-print" style={{ marginBottom: 12 }}>
+        <button className="btn-secondary" onClick={exportCsv}>Unduh CSV</button>
+      </div>
+      <PeriodFilterBar pf={pf} />
+      <div className="panel">
+        <div className="toolbar no-print" style={{ marginBottom: 12 }}>
+          <label className="field" style={{ maxWidth: 260 }}>
+            <span>Filter Antigen</span>
+            <select className="select" value={antigen} onChange={(e) => setAntigen(e.target.value)}>
+              <option value="__dasar__">Semua antigen dasar (ringkasan)</option>
+              <option value="__lanjutan__">Semua antigen lanjutan (ringkasan)</option>
+              <option value="__semua__">Seluruh antigen (ringkasan)</option>
+              <optgroup label="Antigen dasar">
+                {SCHEDULE.filter((x) => x.group === "dasar").map((x) => (<option key={x.key} value={x.key}>{x.label}</option>))}
+              </optgroup>
+              <optgroup label="Antigen lanjutan (booster)">
+                {SCHEDULE.filter((x) => x.group === "lanjutan").map((x) => (<option key={x.key} value={x.key}>{x.label}</option>))}
+              </optgroup>
+            </select>
+          </label>
+          <label className="field" style={{ maxWidth: 220 }}>
+            <span>Urutkan</span>
+            <select className="select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+              <option value="nama">Nama Puskesmas</option>
+              <option value="rendah">Capaian terendah</option>
+              {!matrix && <option value="belum">Belum diimunisasi terbanyak</option>}
+              {!matrix && <option value="terlambat">Terlambat terbanyak</option>}
+            </select>
+          </label>
+          <label className="field" style={{ maxWidth: 220 }}>
+            <span>Cari Puskesmas</span>
+            <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Nama Puskesmas…" />
+          </label>
+        </div>
+        <div className="panel-note" style={{ marginBottom: 10 }}>
+          Sasaran tahun {tahunLaporan}: bayi aktif yang lahir 1 Januari – 31 Desember {tahunLaporan - 1}. Antigen: <b>{judul}</b>. Periode: {pf.label}.
+        </div>
+        <div className="table-wrap">
+          <table className="table small indicator5-table">
+            <thead>
+              {matrix ? (
+                <tr>
+                  <th className="name-cell">Puskesmas</th>
+                  <th>Target Pusdatin (SI)</th>
+                  <th>Sasaran Riil</th>
+                  {antigens.map((a) => (<th key={a.key}>{a.label}<br />% Riil</th>))}
+                </tr>
+              ) : (
+                <tr>
+                  <th className="name-cell">Puskesmas</th>
+                  <th>Target Pusdatin (SI)</th>
+                  <th>Sasaran Riil</th>
+                  <th>Sudah</th>
+                  <th>Belum</th>
+                  <th>Terlambat</th>
+                  <th>% Pusdatin</th>
+                  <th>% Riil</th>
+                </tr>
+              )}
+            </thead>
+            <tbody>
+              {shown.map((r) => (
+                <tr key={r.slug} className={r.sasaran === 0 ? "row-empty" : ""}>
+                  <td className="name-cell">{r.pkm}</td>
+                  <td>{fmtNum(r.target || 0)}</td>
+                  <td>{fmtNum(r.sasaran)}</td>
+                  {matrix ? r.per.map((c) => (<td key={c.key}><AchievementBadge pct={c.pctRiil} /></td>)) : (
+                    <>
+                      <td>{fmtNum(r.per[0].sudah)}</td>
+                      <td>{fmtNum(r.per[0].belum)}</td>
+                      <td style={r.per[0].terlambat ? { color: "var(--danger)", fontWeight: 600 } : undefined}>{fmtNum(r.per[0].terlambat)}</td>
+                      <td><AchievementBadge pct={r.per[0].pctPusdatin} /></td>
+                      <td><AchievementBadge pct={r.per[0].pctRiil} /></td>
+                    </>
+                  )}
+                </tr>
+              ))}
+              {shown.length === 0 && (<tr><td className="empty-cell" colSpan={matrix ? 3 + antigens.length : 8}>Tidak ada Puskesmas yang cocok.</td></tr>)}
+            </tbody>
+            <tfoot>
+              <tr className="indicator5-total-row">
+                <td className="name-cell">{total.pkm}</td>
+                <td>{fmtNum(total.target)}</td>
+                <td>{fmtNum(total.sasaran)}</td>
+                {matrix ? total.per.map((c) => (<td key={c.key}><AchievementBadge pct={c.pctRiil} /></td>)) : (
+                  <>
+                    <td>{fmtNum(total.per[0].sudah)}</td>
+                    <td>{fmtNum(total.per[0].belum)}</td>
+                    <td>{fmtNum(total.per[0].terlambat)}</td>
+                    <td><AchievementBadge pct={total.per[0].pctPusdatin} /></td>
+                    <td><AchievementBadge pct={total.per[0].pctRiil} /></td>
+                  </>
+                )}
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <details className="def-panel no-print">
+          <summary>ℹ️ Definisi operasional tabel kendali</summary>
+          <div className="def-body">
+            <ul>
+              <li><b>Sasaran Riil</b> = bayi aktif (bukan dropout) pada data basis Puskesmas yang lahir pada tahun laporan − 1.</li>
+              <li><b>Sudah</b> = sasaran yang tanggal pemberian antigen terpilih sudah terisi sampai akhir periode. <b>Belum</b> = Sasaran Riil − Sudah.</li>
+              <li><b>Terlambat</b> = sasaran yang belum mendapat antigen terpilih dan sudah melewati jatuh tempo jadwalnya (hanya tampil bila satu antigen dipilih).</li>
+              <li><b>% Pusdatin</b> = Sudah ÷ Target Pusdatin (Surviving Infant per Puskesmas) × 100. <b>% Riil</b> = Sudah ÷ Sasaran Riil × 100. Tampil “–” bila penyebut 0.</li>
+              <li>Mode ringkasan menampilkan % Riil seluruh antigen dalam satu tabel; pilih satu antigen untuk melihat Sudah, Belum, dan Terlambat.</li>
+            </ul>
+          </div>
+        </details>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Menu Dinas: Tabel Kendali Sasaran (50 Puskesmas) ----------
+   Tab 1 "Rincian per Bayi": register kendali tiap bayi dari seluruh Puskesmas (format sama dengan Tabel Kendali Rinci
+   Sasaran di akun Puskesmas, ditambah kolom PKM) dengan filter Puskesmas, antigen, dan status antigen.
+   Tab 2 "Ringkasan per Puskesmas": rekap sasaran/sudah/belum/terlambat per Puskesmas (KendaliRingkasanDinas). */
+function KendaliRincianDinas({ records, today }) {
+  const tahunSasaran = today.getFullYear() - 1;
+  const [pkmF, setPkmF] = useState("Semua");
+  const [antigen, setAntigen] = useState("Semua");
+  const [statusF, setStatusF] = useState("Semua");
+  const [kohort, setKohort] = useState("sasaran");
+  const [jkF, setJkF] = useState("Semua");
+  const [q, setQ] = useState("");
+  const [pageSize, setPageSize] = useState(25);
+  const [page, setPage] = useState(1);
+
+  const sched = antigen === "Semua" ? null : SCHEDULE.find((x) => x.key === antigen);
+  const doseKeys = sched ? [sched.key] : KENDALI_DOSE_KEYS;
+  const doseLabels = doseKeys.map((k) => (SCHEDULE.find((x) => x.key === k) || {}).label || k);
+
+  const rows = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const out = [];
+    records.forEach((r) => {
+      if (pkmF !== "Semua" && r._pkm !== pkmF) return;
+      if (jkF !== "Semua" && r.jk !== jkF) return;
+      if (kohort === "sasaran") {
+        const b = parseCompact(r.tgl_lahir);
+        if (!b || b.getFullYear() !== tahunSasaran) return;
+      }
+      if (needle && !String(r.nama || "").toLowerCase().includes(needle)) return;
+      let status = "";
+      if (sched) {
+        const given = parseCompact(r[sched.key]);
+        if (given) status = "Sudah";
+        else {
+          const st = computeItemStatus(parseCompact(r.tgl_lahir), null, sched, today);
+          status = st.status === "overdue" ? "Terlambat" : st.status === "due" ? "Jatuh tempo" : st.status === "upcoming" ? "Belum waktunya" : "Belum";
+        }
+        if (statusF === "Sudah" && status !== "Sudah") return;
+        if (statusF === "Belum" && status === "Sudah") return;
+        if (statusF === "Terlambat" && status !== "Terlambat") return;
+      }
+      out.push({ r, status });
+    });
+    out.sort((a, b) => String(a.r._pkm).localeCompare(String(b.r._pkm)) || String(a.r.nama).localeCompare(String(b.r.nama)));
+    return out;
+  }, [records, pkmF, jkF, kohort, q, sched, statusF, today, tahunSasaran]);
+
+  useEffect(() => { setPage(1); }, [pkmF, antigen, statusF, kohort, jkF, q, pageSize]);
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const pageRows = rows.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const start = rows.length ? (safePage - 1) * pageSize + 1 : 0;
+  const end = Math.min(safePage * pageSize, rows.length);
+
+  const header = ["No", "PKM", "NIK", "POSY", "KEL/DESA", "NAMA BAYI", "JK", "TGL LAHIR", "AYAH", "IBU", ...doseLabels, ...(sched ? ["STATUS " + sched.label] : []), "Alamat"];
+  const lineOf = ({ r, status }, i) => [i + 1, r._pkm, r.nik || "-", r.posy, r.desa || "-", r.nama, r.jk, fmtDate(parseCompact(r.tgl_lahir)), r.ayah || "-", r.ibu || "-",
+    ...doseKeys.map((k) => fmtDate(parseCompact(r[k]))), ...(sched ? [status] : []), r.alamat || "-"];
+  const fileBase = `tabel-kendali-sasaran-dinas-${pkmF === "Semua" ? "50-puskesmas" : slugifyPkm(pkmF)}-${sched ? sched.key : "semua-antigen"}`;
+  function exportCsv() { downloadCSV(`${fileBase}.csv`, [header, ...rows.map(lineOf)]); }
+  function exportExcel() {
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows.map(lineOf)]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Kendali Sasaran");
+    XLSX.writeFile(wb, `${fileBase}.xlsx`);
+  }
+  const statusColor = (st) => (st === "Sudah" ? "var(--mint)" : st === "Terlambat" ? "var(--danger)" : "var(--ink-soft)");
+
+  return (
+    <div>
+      <div className="export-btn-row no-print" style={{ marginBottom: 12 }}>
+        <button className="btn-secondary" onClick={exportExcel}>Unduh Excel</button>
+        <button className="btn-secondary" onClick={exportCsv}>Unduh CSV</button>
+      </div>
+      <div className="toolbar no-print">
+        <select className="select" value={pkmF} onChange={(e) => setPkmF(e.target.value)}>
+          <option value="Semua">Semua Puskesmas (50)</option>
+          {PKM_LIST.map((p) => (<option key={p} value={p}>{p}</option>))}
+        </select>
+        <select className="select" value={antigen} onChange={(e) => { setAntigen(e.target.value); setStatusF("Semua"); }}>
+          <option value="Semua">Semua antigen</option>
+          <optgroup label="Antigen dasar">{SCHEDULE.filter((x) => x.group === "dasar").map((x) => (<option key={x.key} value={x.key}>{x.label}</option>))}</optgroup>
+          <optgroup label="Antigen lanjutan (booster)">{SCHEDULE.filter((x) => x.group === "lanjutan").map((x) => (<option key={x.key} value={x.key}>{x.label}</option>))}</optgroup>
+        </select>
+        <select className="select" value={statusF} disabled={!sched} title={sched ? "Status pemberian antigen terpilih" : "Pilih satu antigen dulu"} onChange={(e) => setStatusF(e.target.value)}>
+          <option value="Semua">Semua status</option>
+          <option value="Sudah">Sudah diberi</option>
+          <option value="Belum">Belum diberi</option>
+          <option value="Terlambat">Terlambat</option>
+        </select>
+        <select className="select" value={kohort} onChange={(e) => setKohort(e.target.value)}>
+          <option value="sasaran">Sasaran IDL (lahir {tahunSasaran})</option>
+          <option value="semua">Semua bayi aktif</option>
+        </select>
+        <select className="select" value={jkF} onChange={(e) => setJkF(e.target.value)}>
+          <option value="Semua">Semua JK</option>
+          <option value="L">Laki-laki</option>
+          <option value="P">Perempuan</option>
+        </select>
+        <input className="input" placeholder="Cari nama bayi…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select className="select" value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>
+          <option value={25}>Tampilkan 25</option>
+          <option value={50}>Tampilkan 50</option>
+          <option value={100}>Tampilkan 100</option>
+        </select>
+      </div>
+      <div className="panel-note no-print" style={{ marginBottom: 10 }}>
+        {rows.length} bayi cocok dengan filter{sched ? ` · antigen ${sched.label}` : ""}. Tabel ini hanya untuk dilihat dan diunduh; perubahan data dilakukan di akun Puskesmas.
+      </div>
+      <div className="table-wrap dinkes-table-wrap">
+        <table className="table small dinkes-table">
+          <thead><tr>{header.map((h) => (<th key={h}>{h}</th>))}</tr></thead>
+          <tbody>
+            {pageRows.map((row, i) => {
+              const cells = lineOf(row, (safePage - 1) * pageSize + i);
+              return (
+                <tr key={row.r.id || row.r._pkm + "-" + i}>
+                  {cells.map((c, ci) => {
+                    const isStatus = sched && ci === 10 + doseKeys.length;
+                    return <td key={ci} className={ci === 1 || ci === 5 ? "name-cell" : ""} style={isStatus ? { fontWeight: 600, color: statusColor(c) } : undefined}>{c}</td>;
+                  })}
+                </tr>
+              );
+            })}
+            {rows.length === 0 && (<tr><td colSpan={header.length} className="empty-cell">Tidak ada data yang cocok.</td></tr>)}
+          </tbody>
+        </table>
+      </div>
+      <div className="pagination-row no-print">
+        <div className="pagination-info">Menampilkan {start}–{end} dari {rows.length} bayi</div>
+        <div className="pagination-controls">
+          <button className="btn-secondary" disabled={safePage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>‹ Sebelumnya</button>
+          <span className="pagination-page-label">Halaman {safePage} dari {totalPages}</span>
+          <button className="btn-secondary" disabled={safePage >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>Berikutnya ›</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function KendaliSasaranDinasMenu({ records, recordsByPkm, pusdatinMap, pf, today }) {
+  const [tab, setTab] = useState("rincian");
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <div className="eyebrow">Dinas Kesehatan · 50 Puskesmas</div>
+          <h1>Tabel Kendali Sasaran</h1>
+        </div>
+      </div>
+      <div className="tab-row no-print">
+        {[["rincian", "Rincian per Bayi"], ["ringkasan", "Ringkasan per Puskesmas"]].map(([id, label]) => (
+          <button key={id} className={"tab-btn" + (tab === id ? " active" : "")} onClick={() => setTab(id)}>{label}</button>
+        ))}
+      </div>
+      {tab === "rincian" && <KendaliRincianDinas records={records} today={today} />}
+      {tab === "ringkasan" && <KendaliRingkasanDinas recordsByPkm={recordsByPkm} pusdatinMap={pusdatinMap} pf={pf} today={today} />}
+    </div>
+  );
+}
+
 /* ---------- Dinas View: rekap angka capaian dari 50 Puskesmas (read-only) ---------- */
 function DinasView({ onBack, onSwitchAccount }) {
   const [loading, setLoading] = useState(true);
@@ -5173,6 +5633,7 @@ function DinasView({ onBack, onSwitchAccount }) {
             ["rekap", "Rekap Capaian"],
             { group: "Laporan", items: [["kejar-rutin", "Laporan Kejar Rutin"], ["kejar-murni", "Laporan Kejar Murni"], ["laporan-bulanan", "Laporan Bulanan"], ["unduh-laporan", "Unduh Laporan (Excel/PDF)"]] },
             ["rekap-per-desa", "🏘️ Rekap per Desa (Seluruh PKM)"],
+            ["kendali-sasaran", "🎯 Tabel Kendali Sasaran"],
             ["dropout-bnba", "📤 Sasaran Dropout (BNBA)"],
             ["mutasi-dinas", "🔁 Pantauan Mutasi Sasaran"],
             ["sasaran-desa", "Rekap Target Sasaran per Desa"],
@@ -5318,6 +5779,7 @@ function DinasView({ onBack, onSwitchAccount }) {
         {dinasTab === "laporan-bulanan" && <DinasLaporanBulanan allRecords={basisAll} today={today} />}
         {dinasTab === "unduh-laporan" && <LaporanUnduhView records={basisAll} today={today} showPkm />}
         {dinasTab === "rekap-per-desa" && <DinasRekapPerDesa allRecords={basisAll} today={today} />}
+        {dinasTab === "kendali-sasaran" && <KendaliSasaranDinasMenu records={activeAll} recordsByPkm={agg.recordsByPkm} pusdatinMap={pusdatinMap} pf={pf} today={today} />}
         {dinasTab === "dropout-bnba" && <DropoutBnbaReport records={dropoutAll} today={today} showPkm />}
         {dinasTab === "mutasi-dinas" && <DinasMutasiView />}
 
@@ -13772,6 +14234,16 @@ h2 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 17px; margin: 
   .stat-grid, .form-grid, .immun-grid, .posy-grid, .kv-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
+/* ---------- Evaluasi kewajaran capaian ---------- */
+.achv-badge.achv-over { color: #fff; background: var(--danger); font-weight: 700; }
+.eval-panel { margin-bottom: 14px; padding: 12px 16px; border-radius: 12px; font-size: 12.5px; line-height: 1.5; border: 1px solid var(--line); }
+.eval-ok { background: var(--mint-soft); border-color: #BFE3D6; color: #2F6B58; }
+.eval-bad { background: var(--danger-soft); border-color: #F2B8C2; color: #7A2433; }
+.eval-warn { background: var(--gold-soft); border-color: #F0D3A8; color: #7A5220; }
+.eval-panel summary { cursor: pointer; font-weight: 600; margin-top: 6px; }
+.eval-list { margin: 8px 0 0; padding-left: 20px; }
+.eval-list > li { margin-bottom: 10px; }
+.eval-list ul { margin: 4px 0 0; padding-left: 18px; }
 /* ---------- Panel definisi operasional capaian ---------- */
 .def-panel { margin-top: 14px; border: 1px solid var(--line); border-radius: 12px; background: #FFFDFE; }
 .def-panel > summary { cursor: pointer; padding: 12px 16px; font-weight: 600; font-size: 13px; color: var(--primary-dark); list-style: none; }
