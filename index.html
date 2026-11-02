@@ -5820,7 +5820,7 @@ function DinasView({ onBack, onSwitchAccount }) {
               <div>
                 <div className="eyebrow">Kabupaten Jember</div>
                 <h1>Kosongkan Data Basis Sasaran</h1>
-                <div className="panel-note">Menghapus data basis bayi (dasar perhitungan Sasaran Riil) milik satu Puskesmas tertentu, misalnya untuk membersihkan data uji-coba sebelum Puskesmas mulai entri data sesungguhnya.</div>
+                <div className="panel-note">Menghapus data basis bayi (dasar perhitungan Sasaran Riil) berdasarkan Puskesmas, tahun sasaran (tahun lahir), dan desa, misalnya untuk membersihkan data uji-coba atau data satu tahun sasaran tanpa menghapus seluruh data basis.</div>
               </div>
             </div>
             <ClearBasisSasaranPanel allRecords={allRecords} onCleared={() => reloadAllRecords(true)} />
@@ -6211,96 +6211,213 @@ async function clearBasisSasaranForPkm(slug) {
   return window.storage.delete(`bayi-records:${slug}`, false);
 }
 
+/* Hapus SEBAGIAN data basis satu Puskesmas: hanya baris yang cocok `shouldDelete`. Data dibaca ulang dari server
+   (getStrict — kegagalan server TIDAK dianggap "kosong"), disaring, lalu disimpan lagi dengan setStrict. */
+async function deleteBasisSasaranSelective(slug, shouldDelete) {
+  const key = `bayi-records:${slug}`;
+  const res = await window.storage.getStrict(key);
+  if (!res || !res.value) return { removed: 0, remaining: 0 };
+  let list;
+  try { list = JSON.parse(res.value); } catch (e) { throw new Error("data di database tidak terbaca (format rusak), penghapusan dibatalkan"); }
+  if (!Array.isArray(list)) throw new Error("data di database bukan daftar yang valid, penghapusan dibatalkan");
+  const keep = list.filter((r) => !shouldDelete(r));
+  const removed = list.length - keep.length;
+  if (removed === 0) return { removed: 0, remaining: list.length };
+  if (keep.length === 0) {
+    await window.storage.delete(key, false);
+  } else {
+    const payload = JSON.stringify(keep);
+    const out = await window.storage.setStrict(key, payload);
+    if (!out || (out.ok !== true && out.key !== key)) throw new Error("server tidak mengonfirmasi penyimpanan");
+  }
+  return { removed, remaining: keep.length };
+}
+
+/* Metadata perintah "Kosongkan Data Basis Sasaran": cakupan (Puskesmas) + tahun lahir bayi (tahun sasaran) + desa.
+   Tahun sasaran laporan T = bayi lahir T−1, jadi pilihan tahun lahir 2025 berarti sasaran laporan 2026. */
 function ClearBasisSasaranPanel({ allRecords, onCleared }) {
-  const [slug, setSlug] = useState(slugifyPkm("PKM Mangli"));
+  const SEMUA = "__semua__";
+  const [scope, setScope] = useState(slugifyPkm("PKM Mangli"));
+  const [modeTahun, setModeTahun] = useState("semua");
+  const [tahunSel, setTahunSel] = useState([]);
+  const [modeDesa, setModeDesa] = useState("semua");
+  const [desaSel, setDesaSel] = useState([]);
+  const [backup, setBackup] = useState(true);
   const [confirmText, setConfirmText] = useState("");
-  const [step, setStep] = useState(1); // 1 = pilih, 2 = konfirmasi ketik nama
+  const [step, setStep] = useState(1);
   const [running, setRunning] = useState(false);
   const [toast, setToast] = useState("");
+  const [progress, setProgress] = useState("");
 
-  const pkmName = PKM_LIST.find((p) => slugifyPkm(p) === slug) || "";
-  const count = allRecords.filter((r) => r._pkm === pkmName).length;
+  const pkmName = scope === SEMUA ? "" : (PKM_LIST.find((p) => slugifyPkm(p) === scope) || "");
+  const scoped = useMemo(
+    () => (scope === SEMUA ? allRecords : allRecords.filter((r) => r._pkm === pkmName)),
+    [allRecords, scope, pkmName]
+  );
+  const yearOf = (r) => { const d = parseCompact(r.tgl_lahir); return d ? String(d.getFullYear()) : "tanpa"; };
+  const desaKey = (r) => normDesaKey(r.desa) || "";
 
-  function startConfirm() {
-    setConfirmText("");
-    setStep(2);
+  const tahunOptions = useMemo(() => {
+    const m = {};
+    scoped.forEach((r) => { const y = yearOf(r); m[y] = (m[y] || 0) + 1; });
+    return Object.entries(m).sort((a, b) => (a[0] === "tanpa" ? 1 : b[0] === "tanpa" ? -1 : Number(b[0]) - Number(a[0])));
+  }, [scoped]);
+  const desaOptions = useMemo(() => {
+    const m = {};
+    scoped.forEach((r) => {
+      const k = desaKey(r);
+      if (!m[k]) m[k] = { key: k, label: k ? (rapikanNama(r.desa) || r.desa) : "(tanpa desa)", count: 0 };
+      m[k].count++;
+    });
+    return Object.values(m).sort((a, b) => a.label.localeCompare(b.label, "id"));
+  }, [scoped]);
+
+  const filterOk = (r) =>
+    (modeTahun === "semua" || tahunSel.includes(yearOf(r))) &&
+    (modeDesa === "semua" || desaSel.includes(desaKey(r)));
+  const matched = useMemo(() => scoped.filter(filterOk), [scoped, modeTahun, tahunSel, modeDesa, desaSel]);
+  const needSelection = (modeTahun === "pilih" && tahunSel.length === 0) || (modeDesa === "pilih" && desaSel.length === 0);
+  const count = needSelection ? 0 : matched.length;
+  const isFull = modeTahun === "semua" && modeDesa === "semua";
+  const requiredText = !isFull ? "HAPUS" : scope === SEMUA ? "HAPUS SEMUA PUSKESMAS" : pkmName;
+  const confirmMatches = confirmText.trim().toLowerCase() === requiredText.toLowerCase();
+
+  const ringkasan = [
+    `Hapus data bayi`,
+    `Puskesmas: ${scope === SEMUA ? "SEMUA (50 Puskesmas)" : pkmName}`,
+    `Tahun lahir: ${modeTahun === "semua" ? "semua tahun" : tahunSel.length ? tahunSel.map((y) => (y === "tanpa" ? "tanpa tgl lahir" : `${y} (sasaran laporan ${Number(y) + 1})`)).join(", ") : "— belum dipilih —"}`,
+    `Desa: ${modeDesa === "semua" ? "semua desa" : desaSel.length ? desaSel.map((k) => (desaOptions.find((d) => d.key === k) || { label: k }).label).join(", ") : "— belum dipilih —"}`,
+  ];
+
+  function toggle(setter, list, v) { setter(list.includes(v) ? list.filter((x) => x !== v) : [...list, v]); setStep(1); setConfirmText(""); }
+  function resetFilters() { setModeTahun("semua"); setTahunSel([]); setModeDesa("semua"); setDesaSel([]); setStep(1); setConfirmText(""); }
+  function downloadBackup() {
+    const keys = ["nik", "nama", "jk", "tgl_lahir", "posy", "desa", "ayah", "ibu", ...FIELD_KEYS, "alamat", "ket"];
+    const rows = matched.map((r) => [r._pkm, ...keys.map((k) => r[k] ?? "")]);
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadCSV(`cadangan-data-basis-dihapus-${scope === SEMUA ? "semua-pkm" : scope}-${stamp}.csv`, [["pkm", ...keys], ...rows]);
   }
-  function cancelConfirm() {
-    setStep(1);
-    setConfirmText("");
-  }
+
   async function handleClear() {
     setRunning(true);
+    setToast("");
+    const targets = (scope === SEMUA ? PKM_LIST : [pkmName]).filter((n) => matched.some((r) => r._pkm === n));
     try {
-      await clearBasisSasaranForPkm(slug);
-      setToast(`Data basis sasaran ${pkmName} berhasil dikosongkan (${count} data bayi dihapus).`);
-      setStep(1);
-      setConfirmText("");
-      if (onCleared) await onCleared();
-    } catch (e) {
-      setToast("Gagal mengosongkan data. Coba lagi.");
+      if (backup && matched.length) downloadBackup();
+    } catch (e) { /* cadangan gagal diunduh tidak boleh diam-diam; lanjutkan hanya bila pengguna tidak meminta cadangan */
+      setToast("Gagal membuat cadangan, penghapusan dibatalkan."); setRunning(false); return;
     }
+    let removedTotal = 0;
+    const failed = [];
+    for (let i = 0; i < targets.length; i++) {
+      setProgress(`Memproses ${targets[i]} (${i + 1} dari ${targets.length})…`);
+      try {
+        const out = await deleteBasisSasaranSelective(slugifyPkm(targets[i]), filterOk);
+        removedTotal += out.removed;
+      } catch (e) {
+        failed.push(`${targets[i]} (${e && e.message ? e.message : e})`);
+      }
+    }
+    setProgress("");
+    const okMsg = `${removedTotal} data bayi berhasil dihapus dari ${targets.length - failed.length} Puskesmas.`;
+    setToast(failed.length ? `Gagal sebagian: ${failed.join("; ")}. ${okMsg}` : okMsg);
+    setStep(1);
+    setConfirmText("");
+    if (onCleared) await onCleared();
     setRunning(false);
-    setTimeout(() => setToast(""), 5000);
+    setTimeout(() => setToast(""), 9000);
   }
-
-  const confirmMatches = confirmText.trim().toLowerCase() === pkmName.trim().toLowerCase();
 
   return (
     <div className="panel">
       <div className="panel-head">
-        <h2>🗑️ Kosongkan Data Basis Sasaran per Puskesmas</h2>
+        <h2>🗑️ Kosongkan Data Basis Sasaran</h2>
       </div>
       <div className="panel-note" style={{ marginBottom: 14 }}>
-        Menghapus PERMANEN seluruh data basis bayi (yang dipakai untuk menghitung Sasaran Riil) milik satu Puskesmas dari database pusat. Data WUS, Ibu Hamil, dan Balita Puskesmas tersebut <strong>tidak</strong> ikut terhapus. Tindakan ini tidak dapat dibatalkan — pastikan sudah mengunduh/mencadangkan data (Excel/CSV) sebelum melanjutkan bila masih diperlukan.
+        Menghapus PERMANEN data basis bayi (dasar Sasaran Riil) sesuai pilihan di bawah — Puskesmas, tahun lahir bayi (tahun sasaran), dan desa —
+        sehingga tidak seluruh data basis ikut terhapus. Data WUS, Ibu Hamil, dan Balita <strong>tidak</strong> terpengaruh.
       </div>
 
-      <label className="field" style={{ maxWidth: 320, marginBottom: 14 }}>
-        <span>Pilih Puskesmas</span>
-        <select className="select" value={slug} onChange={(e) => { setSlug(e.target.value); setStep(1); setConfirmText(""); }} disabled={running}>
-          {PKM_LIST.map((p) => (
-            <option key={p} value={slugifyPkm(p)}>{p}</option>
-          ))}
-        </select>
+      <div className="clear-grid">
+        <div className="clear-block">
+          <div className="clear-label">1 · Wilayah Puskesmas</div>
+          <select className="select" value={scope} disabled={running} onChange={(e) => { setScope(e.target.value); resetFilters(); }}>
+            {PKM_LIST.map((p) => (<option key={p} value={slugifyPkm(p)}>{p}</option>))}
+            <option value={SEMUA}>— Semua Puskesmas (50) —</option>
+          </select>
+        </div>
+
+        <div className="clear-block">
+          <div className="clear-label">2 · Tahun sasaran (tahun lahir bayi)</div>
+          <label className="radio-field"><input type="radio" checked={modeTahun === "semua"} disabled={running} onChange={() => { setModeTahun("semua"); setStep(1); setConfirmText(""); }} /> Semua tahun lahir</label>
+          <label className="radio-field"><input type="radio" checked={modeTahun === "pilih"} disabled={running} onChange={() => { setModeTahun("pilih"); setStep(1); setConfirmText(""); }} /> Pilih tahun lahir tertentu</label>
+          {modeTahun === "pilih" && (
+            <div className="clear-checks">
+              {tahunOptions.length === 0 && <span className="panel-note">Belum ada data.</span>}
+              {tahunOptions.map(([y, n]) => (
+                <label key={y} className="clear-check">
+                  <input type="checkbox" checked={tahunSel.includes(y)} disabled={running} onChange={() => toggle(setTahunSel, tahunSel, y)} />
+                  <span>{y === "tanpa" ? "Tanpa tanggal lahir" : `Lahir ${y}`}{y !== "tanpa" ? <i> · sasaran laporan {Number(y) + 1}</i> : null} <b>({n})</b></span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="clear-block">
+          <div className="clear-label">3 · Wilayah desa/kelurahan</div>
+          <label className="radio-field"><input type="radio" checked={modeDesa === "semua"} disabled={running} onChange={() => { setModeDesa("semua"); setStep(1); setConfirmText(""); }} /> Semua desa</label>
+          <label className="radio-field"><input type="radio" checked={modeDesa === "pilih"} disabled={running} onChange={() => { setModeDesa("pilih"); setStep(1); setConfirmText(""); }} /> Pilih desa tertentu</label>
+          {modeDesa === "pilih" && (
+            <div className="clear-checks clear-checks-scroll">
+              {desaOptions.length === 0 && <span className="panel-note">Belum ada data.</span>}
+              {desaOptions.map((d) => (
+                <label key={d.key || "kosong"} className="clear-check">
+                  <input type="checkbox" checked={desaSel.includes(d.key)} disabled={running} onChange={() => toggle(setDesaSel, desaSel, d.key)} />
+                  <span>{d.label} <b>({d.count})</b></span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="clear-summary">
+        <div className="clear-label">Ringkasan perintah</div>
+        <ul>{ringkasan.map((t, i) => (<li key={i}>{t}</li>))}</ul>
+        <div className="dist-stat-row" style={{ marginTop: 8 }}>
+          <div className="dist-stat-chip">Akan dihapus<b>{count}</b></div>
+          <div className="dist-stat-chip">Tersisa<b>{scoped.length - count}</b></div>
+          <div className="dist-stat-chip">Total di cakupan<b>{scoped.length}</b></div>
+        </div>
+        {needSelection && <div className="panel-note" style={{ color: "var(--danger)" }}>Pilih minimal satu tahun lahir / desa pada bagian yang memakai “Pilih … tertentu”.</div>}
+        {!isFull && <div className="panel-note">Hanya data yang cocok dengan semua pilihan di atas yang dihapus; data lain tetap utuh.</div>}
+        {isFull && <div className="panel-note" style={{ color: "var(--danger)" }}>Tidak ada penyaring: <b>seluruh</b> data basis di cakupan ini akan dihapus.</div>}
+      </div>
+
+      <label className="radio-field" style={{ margin: "10px 0" }}>
+        <input type="checkbox" checked={backup} disabled={running} onChange={(e) => setBackup(e.target.checked)} /> Unduh cadangan (CSV) data yang dihapus sebelum penghapusan (disarankan)
       </label>
 
-      <div className="dist-stat-row" style={{ marginBottom: 14 }}>
-        <div className="dist-stat-chip">Data bayi tersimpan saat ini<b>{count}</b></div>
-      </div>
-
       {toast && (
-        <div className="panel-note" style={{ marginBottom: 12, color: toast.startsWith("Gagal") ? "var(--danger)" : "var(--success, #16a34a)" }}>
-          {toast}
-        </div>
+        <div className="panel-note" style={{ marginBottom: 12, color: /^Gagal/.test(toast) ? "var(--danger)" : "var(--success, #16a34a)" }}>{toast}</div>
       )}
+      {progress && <div className="panel-note" style={{ marginBottom: 8 }}>{progress}</div>}
 
       {step === 1 && (
-        <button className="btn-danger" onClick={startConfirm} disabled={count === 0 || running}>
-          🗑️ Kosongkan Data Basis Sasaran {pkmName}
+        <button className="btn-danger" onClick={() => { setConfirmText(""); setStep(2); }} disabled={count === 0 || running}>
+          🗑️ Hapus {count} Data Bayi Sesuai Pilihan
         </button>
       )}
-
       {step === 2 && (
         <div className="confirm-panel panel" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
           <div>
-            Yakin ingin menghapus permanen <strong>{count} data bayi</strong> milik <strong>{pkmName}</strong>? Ketik nama Puskesmas persis seperti di atas untuk mengonfirmasi:
+            Yakin ingin menghapus permanen <strong>{count} data bayi</strong> sesuai ringkasan di atas? Ketik <strong>{requiredText}</strong> untuk mengonfirmasi:
           </div>
-          <input
-            type="text"
-            className="pusdatin-input"
-            style={{ maxWidth: 320 }}
-            placeholder={pkmName}
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-            disabled={running}
-          />
+          <input type="text" className="pusdatin-input" style={{ maxWidth: 360 }} placeholder={requiredText} value={confirmText} onChange={(e) => setConfirmText(e.target.value)} disabled={running} />
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn-danger" onClick={handleClear} disabled={!confirmMatches || running}>
-              {running ? "Menghapus…" : "Ya, Hapus Permanen"}
-            </button>
-            <button className="btn-secondary" onClick={cancelConfirm} disabled={running}>
-              Batal
-            </button>
+            <button className="btn-danger" onClick={handleClear} disabled={!confirmMatches || running}>{running ? "Menghapus…" : "Ya, Hapus Permanen"}</button>
+            <button className="btn-secondary" onClick={() => { setStep(1); setConfirmText(""); }} disabled={running}>Batal</button>
           </div>
         </div>
       )}
@@ -14234,6 +14351,16 @@ h2 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 17px; margin: 
   .stat-grid, .form-grid, .immun-grid, .posy-grid, .kv-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
+/* ---------- Kosongkan data basis selektif ---------- */
+.clear-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 14px; }
+.clear-block { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: #FFFDFE; }
+.clear-label { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; font-weight: 600; color: var(--ink-soft); margin-bottom: 8px; }
+.clear-checks { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; padding-left: 4px; }
+.clear-checks-scroll { max-height: 200px; overflow-y: auto; }
+.clear-check { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; cursor: pointer; }
+.clear-check i { color: var(--ink-soft); font-style: normal; }
+.clear-summary { border: 1px dashed #E3A8B5; border-radius: 12px; padding: 12px 16px; background: var(--danger-soft); margin-bottom: 8px; font-size: 12.5px; }
+.clear-summary ul { margin: 0; padding-left: 18px; }
 /* ---------- Evaluasi kewajaran capaian ---------- */
 .achv-badge.achv-over { color: #fff; background: var(--danger); font-weight: 700; }
 .eval-panel { margin-bottom: 14px; padding: 12px 16px; border-radius: 12px; font-size: 12.5px; line-height: 1.5; border: 1px solid var(--line); }
