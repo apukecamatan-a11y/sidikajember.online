@@ -2465,6 +2465,16 @@ function indicatorFlags(rec, today) {
     rv3: !!parseCompact(rec.rv3),
   };
 }
+/* Definisi operasional sasaran IDL: bayi yang harus diimunisasi & mendapat IDL pada tahun laporan T adalah bayi
+   lahir 1 Jan s/d 31 Des tahun T-1. Tahun laporan = tahun tanggal akhir periode (cumEnd) yang dipilih.
+   Dipakai untuk Sasaran Riil serta Capaian indikator berbasis Surviving Infant (IDL, MR 1, PCV 2, RV 3).
+   IBL (Baduta) tidak memakai kohort ini. */
+function sasaranBirthYear(today) { return today.getFullYear() - 1; }
+function isSasaranBirthYear(rec, today) {
+  const b = parseCompact(rec.tgl_lahir);
+  return !!b && b.getFullYear() === sasaranBirthYear(today);
+}
+const COHORT_FREE_INDICATORS = ["ibl"];
 function pctOrNull(num, den) {
   return den ? Math.round((num / den) * 100) : null;
 }
@@ -2472,11 +2482,14 @@ function pctOrNull(num, den) {
 function computeIndicator5Rows(recordsByPkm, pusdatinMap, today) {
   const rows = PKM_LIST.map((p) => {
     const list = recordsByPkm[p] || [];
-    const sasaranRiil = list.filter(notDropout).length;
+    const sasaranRiilSemua = list.filter(notDropout).length;
+    const sasaranRiil = list.filter((r) => notDropout(r) && isSasaranBirthYear(r, today)).length;
     const capaian = { idl: 0, ibl: 0, mr1: 0, pcv2: 0, rv3: 0 };
     list.forEach((r) => {
+      if (!notDropout(r)) return; // dropout tidak masuk sasaran, jadi tidak ikut dihitung sebagai capaian
       const f = indicatorFlags(r, today);
-      INDICATOR_DEFS.forEach((d) => { if (f[d.key]) capaian[d.key]++; });
+      const inCohort = isSasaranBirthYear(r, today);
+      INDICATOR_DEFS.forEach((d) => { if (f[d.key] && (inCohort || COHORT_FREE_INDICATORS.includes(d.key))) capaian[d.key]++; });
     });
     const slug = slugifyPkm(p);
     const pusdatin = (pusdatinMap && pusdatinMap[slug]) || {};
@@ -2486,19 +2499,19 @@ function computeIndicator5Rows(recordsByPkm, pusdatinMap, today) {
       return {
         key: d.key,
         pusdatinTarget: target,
-        sasaranRiil,
+        sasaranRiil: COHORT_FREE_INDICATORS.includes(d.key) ? sasaranRiilSemua : sasaranRiil,
         capaian: c,
         pctPusdatin: pctOrNull(c, target),
-        pctRiil: pctOrNull(c, sasaranRiil),
+        pctRiil: pctOrNull(c, COHORT_FREE_INDICATORS.includes(d.key) ? sasaranRiilSemua : sasaranRiil),
       };
     });
-    return { pkm: p, slug, sasaranRiil, jumlahPenduduk: JUMLAH_PENDUDUK_MAP[slug] || 0, indicators };
+    return { pkm: p, slug, sasaranRiil, sasaranRiilSemua, jumlahPenduduk: JUMLAH_PENDUDUK_MAP[slug] || 0, indicators };
   });
-  const totalRow = { pkm: "Kabupaten Jember", slug: null, sasaranRiil: rows.reduce((s, r) => s + r.sasaranRiil, 0), jumlahPenduduk: totalJumlahPenduduk() };
+  const totalRow = { pkm: "Kabupaten Jember", slug: null, sasaranRiil: rows.reduce((s, r) => s + r.sasaranRiil, 0), sasaranRiilSemua: rows.reduce((s, r) => s + r.sasaranRiilSemua, 0), jumlahPenduduk: totalJumlahPenduduk() };
   totalRow.indicators = INDICATOR_DEFS.map((d, di) => {
     const target = rows.reduce((s, r) => s + (r.indicators[di].pusdatinTarget || 0), 0);
     const c = rows.reduce((s, r) => s + r.indicators[di].capaian, 0);
-    return { key: d.key, pusdatinTarget: target, sasaranRiil: totalRow.sasaranRiil, capaian: c, pctPusdatin: pctOrNull(c, target), pctRiil: pctOrNull(c, totalRow.sasaranRiil) };
+    return { key: d.key, pusdatinTarget: target, sasaranRiil: COHORT_FREE_INDICATORS.includes(d.key) ? totalRow.sasaranRiilSemua : totalRow.sasaranRiil, capaian: c, pctPusdatin: pctOrNull(c, target), pctRiil: pctOrNull(c, COHORT_FREE_INDICATORS.includes(d.key) ? totalRow.sasaranRiilSemua : totalRow.sasaranRiil) };
   });
   return { rows, totalRow };
 }
@@ -2531,7 +2544,8 @@ function computeIndicator5RowsByDesa(records, slug, today) {
   });
 
   function buildRow(label, list, pusdatinFor) {
-    const aktifList = list.filter(notDropout);
+    const aktifSemua = list.filter(notDropout);
+    const aktifList = aktifSemua.filter((r) => isSasaranBirthYear(r, today));
     const sasaranRiil = {
       L: aktifList.filter((r) => r.jk === "L").length,
       P: aktifList.filter((r) => r.jk === "P").length,
@@ -2539,8 +2553,10 @@ function computeIndicator5RowsByDesa(records, slug, today) {
     };
     const capaian = { idl: 0, ibl: 0, mr1: 0, pcv2: 0, rv3: 0 };
     list.forEach((r) => {
+      if (!notDropout(r)) return; // dropout tidak masuk sasaran, jadi tidak ikut dihitung sebagai capaian
       const f = indicatorFlags(r, today);
-      INDICATOR_DEFS.forEach((d) => { if (f[d.key]) capaian[d.key]++; });
+      const inCohort = isSasaranBirthYear(r, today);
+      INDICATOR_DEFS.forEach((d) => { if (f[d.key] && (inCohort || COHORT_FREE_INDICATORS.includes(d.key))) capaian[d.key]++; });
     });
     const indicators = INDICATOR_DEFS.map((d) => {
       // pusdatinFor(key) mengembalikan objek target {L,P,T} per desa (dari SASARAN_DESA_MAP),
@@ -2555,13 +2571,15 @@ function computeIndicator5RowsByDesa(records, slug, today) {
           P: Number(targetObj && targetObj.P) || 0,
           T: targetT,
         },
-        sasaranRiil,
+        sasaranRiil: COHORT_FREE_INDICATORS.includes(d.key)
+          ? { L: aktifSemua.filter((r) => r.jk === "L").length, P: aktifSemua.filter((r) => r.jk === "P").length, T: aktifSemua.length }
+          : sasaranRiil,
         capaian: c,
         pctPusdatin: pctOrNull(c, targetT),
-        pctRiil: pctOrNull(c, sasaranRiil.T),
+        pctRiil: pctOrNull(c, COHORT_FREE_INDICATORS.includes(d.key) ? aktifSemua.length : sasaranRiil.T),
       };
     });
-    return { desa: label, sasaranRiil, indicators };
+    return { desa: label, sasaranRiil, sasaranRiilSemua: aktifSemua.length, indicators };
   }
 
   const rows = desaRows.map((d) => {
@@ -2610,7 +2628,7 @@ function computeIndicator5ByDesaAllPkm(recordsByPkm, today) {
       const targetP = list.reduce((s, r) => s + (r.indicators[i].pusdatinTarget.P || 0), 0);
       const targetT = list.reduce((s, r) => s + (r.indicators[i].pusdatinTarget.T || 0), 0);
       const c = list.reduce((s, r) => s + r.indicators[i].capaian, 0);
-      const sasaranT = list.reduce((s, r) => s + r.sasaranRiil.T, 0);
+      const sasaranT = list.reduce((s, r) => s + (COHORT_FREE_INDICATORS.includes(d.key) ? r.sasaranRiilSemua : r.sasaranRiil.T), 0);
       return { key: d.key, pusdatinTarget: { L: targetL, P: targetP, T: targetT }, capaian: c, pctPusdatin: pctOrNull(c, targetT), pctRiil: pctOrNull(c, sasaranT) };
     });
   }
@@ -2726,18 +2744,18 @@ function IndicatorDefinitionPanel() {
           </table>
         </div>
         <p className="def-note">
-          Catatan penerapan pada tabel ini: kolom <i>Sasaran Riil</i> saat ini menghitung seluruh bayi aktif pada data basis (usia 0–59 bulan),
-          belum dibatasi menurut tahun lahir di atas. Untuk menilai capaian sesuai definisi sasaran IDL, acuan utama adalah <i>% Pusdatin</i>
-          (target Surviving Infant resmi), atau gunakan filter Kohort Usia Sasaran bila tersedia.
+          Penerapan pada tabel ini: tahun laporan diambil dari tanggal akhir periode yang dipilih. <i>Sasaran Riil</i> hanya menghitung bayi aktif
+          yang lahir pada tahun laporan − 1, dan <i>Capaian</i> IDL, MR 1, PCV 2, serta RV 3 hanya menghitung bayi dari kohort lahir yang sama
+          (sama dengan dasar target Surviving Infant). Indikator IBL (Baduta) tidak memakai kohort ini.
         </p>
 
         <h3>Rumus</h3>
         <ul>
-          <li><b>Sasaran Riil (L / P / Total)</b> = jumlah bayi <i>aktif</i> (bukan dropout) pada data basis Puskesmas di wilayah tersebut, dipecah menurut jenis kelamin; Total = L + P.</li>
+          <li><b>Sasaran Riil (L / P / Total)</b> = jumlah bayi <i>aktif</i> (bukan dropout) pada data basis Puskesmas di wilayah tersebut yang <i>lahir pada tahun laporan − 1</i>, dipecah menurut jenis kelamin; Total = L + P.</li>
           <li><b>Target Pusdatin (SI / Baduta)</b> = angka sasaran resmi per Desa dari menu <i>Sasaran per Desa</i>. IDL, MR 1, PCV 2, dan RV 3 memakai <i>Surviving Infant</i>; IBL memakai <i>Baduta 12–23 bulan</i>. Pada tabel per Puskesmas, target ini diinput Dinas.</li>
-          <li><b>Capaian</b> = jumlah bayi yang memenuhi kriteria indikator (tabel di bawah), dihitung <i>kumulatif sampai akhir periode</i> yang dipilih.</li>
+          <li><b>Capaian</b> = jumlah bayi yang memenuhi kriteria indikator (tabel di bawah), dihitung <i>kumulatif sampai akhir periode</i> yang dipilih. Untuk IDL, MR 1, PCV 2, dan RV 3 hanya bayi lahir tahun laporan − 1 yang dihitung; IBL menghitung semua bayi yang memenuhi kriteria.</li>
           <li><b>% Pusdatin</b> = Capaian ÷ Target Pusdatin (Total) × 100, dibulatkan ke bilangan bulat. Tampil “–” bila target 0 atau belum ada.</li>
-          <li><b>% Riil</b> = Capaian ÷ Sasaran Riil (Total) × 100, dibulatkan ke bilangan bulat. Tampil “–” bila Sasaran Riil 0.</li>
+          <li><b>% Riil</b> = Capaian ÷ Sasaran Riil (Total) × 100, dibulatkan ke bilangan bulat. Tampil “–” bila Sasaran Riil 0. Khusus IBL, penyebutnya seluruh bayi aktif (semua tahun lahir).</li>
           <li><b>Baris TOTAL</b> = jumlah seluruh bayi di Puskesmas/kabupaten, bukan sekadar penjumlahan baris desa; bayi yang nama desanya tidak cocok dengan daftar resmi tetap ikut dihitung di TOTAL.</li>
         </ul>
 
@@ -2759,20 +2777,21 @@ function IndicatorDefinitionPanel() {
 
         <h3>Aturan Data</h3>
         <ul>
-          <li><b>Periode:</b> hanya tanggal imunisasi sampai akhir periode yang dipilih yang dihitung; bayi yang lahir setelah akhir periode tidak ikut. Filter kohort usia (bila dipilih) juga membatasi bayi yang dihitung.</li>
+          <li><b>Periode:</b> hanya tanggal imunisasi sampai akhir periode yang dipilih yang dihitung; bayi yang lahir setelah akhir periode tidak ikut. Filter kohort usia (bila dipilih) juga membatasi bayi yang dihitung. Bayi tanpa tanggal lahir tidak masuk sasaran IDL.</li>
           <li><b>Pencocokan desa:</b> bayi dikaitkan ke desa lewat kolom <i>Desa</i> (cadangan: <i>Posyandu</i> bila Desa kosong), tanpa membedakan huruf besar/kecil dan spasi berlebih.</li>
-          <li><b>Capaian vs dropout:</b> Capaian dihitung dari seluruh catatan imunisasi di data basis, sedangkan Sasaran Riil hanya bayi aktif. Bayi dropout yang imunisasinya sudah lengkap masih ikut sebagai capaian.</li>
+          <li><b>Bayi dropout</b> dikeluarkan dari Sasaran Riil maupun Capaian, sehingga pembilang dan penyebut % Riil berasal dari kelompok bayi yang sama.</li>
           <li><b>Membaca IBL:</b> % Riil IBL memakai seluruh bayi aktif sebagai penyebut (termasuk yang belum berusia 12 bulan), sehingga cenderung lebih rendah. Acuan utama IBL adalah % Pusdatin terhadap target Baduta.</li>
+          <li><b>Contoh angka di bawah</b> hanya ilustrasi rumus, bukan nilai yang pasti tampil di tabel.</li>
           <li><b>Nilai di atas 100%</b> berarti bayi terdata/terimunisasi melebihi angka target Pusdatin, lazim terjadi bila target lebih kecil dari jumlah bayi sebenarnya (mis. sasaran dari desa lain atau pendatang).</li>
         </ul>
 
         <h3>Skala Warna Capaian</h3>
         <p className="def-scale">0–49% Rendah · 50–74% Sedang · 75–89% Baik · 90% ke atas Optimal</p>
 
-        <h3>Contoh Perhitungan (IDL, Desa Cakru)</h3>
+        <h3>Contoh Perhitungan (ilustrasi IDL)</h3>
         <p className="def-example">
-          Capaian 253 bayi · Target Pusdatin (SI Total) 155 · Sasaran Riil 304.<br />
-          % Pusdatin = 253 ÷ 155 × 100 = <b>163%</b> · % Riil = 253 ÷ 304 × 100 = <b>83%</b>.
+          Capaian 120 bayi · Target Pusdatin (SI Total) 150 · Sasaran Riil 140.<br />
+          % Pusdatin = 120 ÷ 150 × 100 = <b>80%</b> · % Riil = 120 ÷ 140 × 100 = <b>86%</b>.
         </p>
       </div>
     </details>
