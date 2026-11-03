@@ -4346,7 +4346,7 @@ const REKAP_PUBLIK_ENTITY = "__REKAP_PUBLIK__";
 
 /* ---------- Akun login per wilayah (Puskesmas) & Admin Dinas ---------- */
 function accountSlug(name) {
-  return name === DINAS_ENTITY ? "admindinas" : slugifyPkm(name);
+  return name === DINAS_ENTITY ? "sidikajember" : slugifyPkm(name);
 }
 function accountLabel(name) {
   return name === DINAS_ENTITY ? "Admin Dinas Kesehatan Kabupaten Jember" : `Admin ${name}`;
@@ -4410,7 +4410,7 @@ const PKM_DEFAULT_PASSWORDS = {
   "pkm-banjarsengon": "Banjarsengon2050",
 };
 function defaultPasswordForSlug(slug) {
-  if (slug === "admindinas") return "dinas2026";
+  if (slug === "sidikajember") return "dinas2026";
   return PKM_DEFAULT_PASSWORDS[slug] || "posyandu2026";
 }
 async function getAccountPassword(slug) {
@@ -4618,7 +4618,7 @@ function PkmSelector({ onSelect }) {
   const contohSlug = accountSlug(PKM_LIST[0] || "");
 
   /* Alur masuk (tanpa memilih Puskesmas): cukup nama pengguna (username) + kata sandi. Akun dikenali dari username:
-     - Admin Dinas       : "admindinas".
+     - Admin Dinas       : "sidikajember" (huruf besar/kecil diabaikan).
      - Admin Puskesmas   : kode akun Puskesmas (mis. "kaliwates"), atau "admin-" diikuti kode akun.
      - Operator Posyandu : nama operator yang didaftarkan Admin Puskesmas (huruf besar/kecil dan spasi diabaikan).
        Bila nama yang sama dipakai di lebih dari satu Puskesmas, tulis "nama@kode-puskesmas". */
@@ -4651,7 +4651,7 @@ function PkmSelector({ onSelect }) {
       }
       // 1) Admin Dinas
       if (!pkmPart && u === accountSlug(DINAS_ENTITY)) {
-        failPkm = DINAS_ENTITY; failUser = "admindinas"; failRole = "Admin Dinas";
+        failPkm = DINAS_ENTITY; failUser = "sidikajember"; failRole = "Admin Dinas";
         const validPwd = await getAccountPassword(accountSlug(DINAS_ENTITY));
         if (password === validPwd) {
           writeLoginMeta({ pkm: DINAS_ENTITY, user: failUser, role: failRole });
@@ -4768,7 +4768,7 @@ function PkmSelector({ onSelect }) {
         </button>
         {showHelp && (
           <div className="panel-note">
-            Masuk cukup dengan nama pengguna (username) dan kata sandi, tanpa memilih Puskesmas. Username Admin Puskesmas adalah kode akun Puskesmas (contoh: {contohSlug}); username Admin Dinas adalah "admindinas"; username Operator Posyandu adalah nama operator yang didaftarkan Admin Puskesmas. Bila nama operator yang sama dipakai di beberapa Puskesmas, tulis dengan format nama@kode-puskesmas (contoh: nama@{contohSlug}). Kata sandi awal berbeda untuk tiap Puskesmas — tanyakan ke Admin Dinas Kesehatan Kabupaten Jember bila belum tahu. Segera ganti kata sandi setelah masuk pertama kali melalui menu "Ubah Kata Sandi". Jika lupa, minta Admin Dinas mereset lewat menu Kelola Akun &amp; Akses; untuk akun Operator, minta Admin Puskesmas Anda.
+            Masuk cukup dengan nama pengguna (username) dan kata sandi, tanpa memilih Puskesmas. Username Admin Puskesmas adalah kode akun Puskesmas (contoh: {contohSlug}); username Admin Dinas adalah "sidikajember"; username Operator Posyandu adalah nama operator yang didaftarkan Admin Puskesmas. Bila nama operator yang sama dipakai di beberapa Puskesmas, tulis dengan format nama@kode-puskesmas (contoh: nama@{contohSlug}). Kata sandi awal berbeda untuk tiap Puskesmas — tanyakan ke Admin Dinas Kesehatan Kabupaten Jember bila belum tahu. Segera ganti kata sandi setelah masuk pertama kali melalui menu "Ubah Kata Sandi". Jika lupa, minta Admin Dinas mereset lewat menu Kelola Akun &amp; Akses; untuk akun Operator, minta Admin Puskesmas Anda.
           </div>
         )}
       </div>
@@ -9539,7 +9539,7 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
       const uname = slugifyPkm(name);
       const reserved = uname === accountSlug(DINAS_ENTITY) || PKM_LIST.some((x) => accountSlug(x) === uname || "admin-" + accountSlug(x) === uname);
       if (!uname || reserved) {
-        setError("Nama operator tidak boleh sama dengan username Admin (kode akun Puskesmas, \"admin-kode\", atau \"admindinas\"). Gunakan nama lain.");
+        setError("Nama operator tidak boleh sama dengan username Admin (kode akun Puskesmas, \"admin-kode\", atau \"sidikajember\"). Gunakan nama lain.");
         return;
       }
       if ((list || []).some((o) => slugifyPkm(o.name || "") === uname)) {
