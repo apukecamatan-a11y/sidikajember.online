@@ -1957,8 +1957,44 @@ function NavGroup({ label, items, current, onSelect, pending }) {
   );
 }
 
-function PasswordField({ value, onChange, placeholder, onKeyDown, autoFocus, id }) {
+/* Hook anti isi-otomatis (autofill/pengelola sandi browser) untuk layar login.
+   Isian yang terisi TANPA diketik/ditempel pengguna dianggap hasil autofill dan langsung dikosongkan. */
+function useNoAutofill(value, clear) {
+  const typed = useRef(false);
+  const [armed, setArmed] = useState(false); // readOnly sampai pengguna menyentuh kolom (autofill melewati kolom readOnly)
+  useEffect(() => {
+    const timers = [60, 300, 800, 1600, 3000].map((ms) => setTimeout(() => {
+      if (!typed.current) clear();
+    }, ms));
+    return () => timers.forEach(clearTimeout);
+  }, []);
+  return {
+    readOnly: !armed,
+    onFocus: () => setArmed(true),
+    onPointerDown: () => setArmed(true),
+    onKeyDown: () => { typed.current = true; },
+    onPaste: () => { typed.current = true; },
+    onCompositionStart: () => { typed.current = true; },
+    onBeforeInput: () => { typed.current = true; },
+  };
+}
+function PasswordField({ value, onChange, placeholder, onKeyDown, autoFocus, id, noAutofill, onAutofillClear }) {
   const [visible, setVisible] = useState(false);
+  const guard = useNoAutofill(value, onAutofillClear || (() => {}));
+  const extra = noAutofill
+    ? {
+        autoComplete: "new-password",
+        name: "pw_" + Math.random().toString(36).slice(2, 9),
+        readOnly: guard.readOnly,
+        onFocus: guard.onFocus,
+        onPointerDown: guard.onPointerDown,
+        onPaste: guard.onPaste,
+        onCompositionStart: guard.onCompositionStart,
+        onBeforeInput: guard.onBeforeInput,
+        "data-lpignore": "true",
+        "data-1p-ignore": "true",
+      }
+    : { autoComplete: "current-password" };
   return (
     <div className="password-field-wrap">
       <input
@@ -1968,9 +2004,9 @@ function PasswordField({ value, onChange, placeholder, onKeyDown, autoFocus, id 
         placeholder={placeholder}
         value={value}
         onChange={onChange}
-        onKeyDown={onKeyDown}
+        onKeyDown={(e) => { if (noAutofill) guard.onKeyDown(e); if (onKeyDown) onKeyDown(e); }}
         autoFocus={autoFocus}
-        autoComplete="current-password"
+        {...extra}
       />
       <button
         type="button"
@@ -1982,6 +2018,35 @@ function PasswordField({ value, onChange, placeholder, onKeyDown, autoFocus, id 
         {visible ? "🙈" : "👁"}
       </button>
     </div>
+  );
+}
+
+/* Kolom username layar login dengan perlindungan yang sama */
+function LoginUsernameField({ value, onChange, onKeyDown, placeholder, onAutofillClear }) {
+  const guard = useNoAutofill(value, onAutofillClear);
+  const [nm] = useState(() => "un_" + Math.random().toString(36).slice(2, 9));
+  return (
+    <input
+      className="input"
+      type="text"
+      name={nm}
+      placeholder={placeholder}
+      value={value}
+      onChange={onChange}
+      onKeyDown={(e) => { guard.onKeyDown(e); if (onKeyDown) onKeyDown(e); }}
+      onFocus={guard.onFocus}
+      onPointerDown={guard.onPointerDown}
+      onPaste={guard.onPaste}
+      onCompositionStart={guard.onCompositionStart}
+      onBeforeInput={guard.onBeforeInput}
+      readOnly={guard.readOnly}
+      autoComplete="off"
+      autoCapitalize="none"
+      autoCorrect="off"
+      spellCheck={false}
+      data-lpignore="true"
+      data-1p-ignore="true"
+    />
   );
 }
 
@@ -4357,6 +4422,108 @@ async function getAccountPassword(slug) {
   }
 }
 
+/* ---------- Log Aktivitas Akun (dipantau Admin Dinas) ----------
+   Setiap kejadian penting dicatat ke penyimpanan bersama, satu kunci per HARI: `activity-log:YYYY-MM-DD`
+   (tanggal WIB). Yang dicatat: masuk, gagal masuk, keluar, Admin Dinas membuka akun Puskesmas, serta aksi
+   penting (ubah/reset kata sandi, kelola akun Operator, impor data, kosongkan data basis).
+   TIDAK PERNAH mencatat kata sandi. Pada gagal masuk dengan username yang tidak dikenal, teks yang diketik
+   tidak disimpan (untuk menghindari kata sandi yang salah ketik di kolom username ikut terekam).
+   Data log hanya ditampilkan di menu "Monitoring Aktivitas Akun" yang hanya ada pada akun Admin Dinas. */
+const ACTIVITY_PREFIX = "activity-log:";
+const ACTIVITY_MAX_PER_DAY = 3000;
+const ACTIVITY_RETENTION_DAYS = 90;
+function activityDayKey(ms) {
+  return new Date((ms == null ? Date.now() : ms) + 7 * 3600 * 1000).toISOString().slice(0, 10); // tanggal WIB
+}
+function getDeviceInfo() {
+  let dev = "-";
+  try {
+    dev = window.localStorage.getItem("device-id") || "";
+    if (!dev) {
+      dev = Math.random().toString(36).slice(2, 8).toUpperCase();
+      window.localStorage.setItem("device-id", dev);
+    }
+  } catch (e) { dev = "-"; }
+  const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+  const os = /Windows/.test(ua) ? "Windows" : /Android/.test(ua) ? "Android" : /iPhone|iPad|iPod/.test(ua) ? "iOS" : /Mac OS/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : "Lainnya";
+  const br = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Browser";
+  return { dev: dev, ua: br + " · " + os };
+}
+function readLoginMeta() {
+  try { return JSON.parse(window.sessionStorage.getItem("login-meta") || "null"); } catch (e) { return null; }
+}
+function writeLoginMeta(meta) {
+  try {
+    if (!meta) window.sessionStorage.removeItem("login-meta");
+    else window.sessionStorage.setItem("login-meta", JSON.stringify(meta));
+  } catch (e) {}
+}
+async function logActivity(ev) {
+  try {
+    const meta = readLoginMeta() || {};
+    const di = getDeviceInfo();
+    const now = Date.now();
+    const entry = {
+      id: now.toString(36) + Math.random().toString(36).slice(2, 7),
+      t: new Date(now).toISOString(),
+      type: ev.type,
+      pkm: ev.pkm != null ? ev.pkm : (meta.pkm || ""),
+      user: ev.user != null ? ev.user : (meta.user || ""),
+      role: ev.role != null ? ev.role : (meta.role || ""),
+      detail: String(ev.detail || "").slice(0, 300),
+      dev: di.dev,
+      ua: di.ua,
+    };
+    const key = ACTIVITY_PREFIX + activityDayKey(now);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let arr = [];
+      try {
+        const r = await window.storage.getStrict(key);
+        if (r && r.value) arr = JSON.parse(r.value) || [];
+      } catch (e) { continue; }
+      if (!Array.isArray(arr)) arr = [];
+      if (!arr.some((x) => x && x.id === entry.id)) arr.push(entry);
+      if (arr.length > ACTIVITY_MAX_PER_DAY) arr = arr.slice(-ACTIVITY_MAX_PER_DAY);
+      try { await window.storage.setStrict(key, JSON.stringify(arr)); } catch (e) { continue; }
+      // verifikasi: baca ulang, pastikan entri tidak tertimpa penulisan bersamaan dari perangkat lain
+      try {
+        const v = await window.storage.getStrict(key);
+        const back = v && v.value ? JSON.parse(v.value) : [];
+        if (Array.isArray(back) && back.some((x) => x && x.id === entry.id)) return;
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
+async function loadActivityLog(days) {
+  // days: jumlah hari ke belakang (termasuk hari ini). Mengembalikan { events, errors }
+  const out = { events: [], errors: 0 };
+  const listRes = await window.storage.list(ACTIVITY_PREFIX);
+  const keys = ((listRes && listRes.keys) || []).filter((k) => String(k).indexOf(ACTIVITY_PREFIX) === 0);
+  const minDay = days > 0 ? activityDayKey(Date.now() - (days - 1) * 86400000) : "";
+  const use = keys.filter((k) => !minDay || String(k).slice(ACTIVITY_PREFIX.length) >= minDay).sort().reverse();
+  for (const k of use) {
+    try {
+      const r = await window.storage.getStrict(k);
+      if (r && r.value) {
+        const arr = JSON.parse(r.value);
+        if (Array.isArray(arr)) arr.forEach((x) => out.events.push(x));
+      }
+    } catch (e) { out.errors++; }
+  }
+  out.events.sort((a, b) => String(b.t).localeCompare(String(a.t)));
+  return out;
+}
+async function purgeActivityLog(olderThanDays) {
+  const listRes = await window.storage.list(ACTIVITY_PREFIX);
+  const keys = ((listRes && listRes.keys) || []).filter((k) => String(k).indexOf(ACTIVITY_PREFIX) === 0);
+  const cutoff = activityDayKey(Date.now() - olderThanDays * 86400000);
+  let n = 0;
+  for (const k of keys) {
+    if (String(k).slice(ACTIVITY_PREFIX.length) < cutoff) { await window.storage.delete(k, false); n++; }
+  }
+  return n;
+}
+
 /* ---------- Akun Operator Posyandu (sub-akun, didaftarkan oleh Admin Puskesmas) ----------
    Setiap Puskesmas (slug) dapat memiliki beberapa akun Operator, masing-masing terkunci
    ke satu Posyandu (dan opsional Desa/Kelurahan). Akun ini terpisah dari akun Admin
@@ -4442,65 +4609,112 @@ function SwitchAccountPanel({ onPick, onClose }) {
   );
 }
 
-function PkmSelector({ onSelect, initial }) {
-  const [query, setQuery] = useState("");
-  const [highlighted, setHighlighted] = useState(initial || null);
+function PkmSelector({ onSelect }) {
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  const [operatorAccounts, setOperatorAccounts] = useState([]);
-  const [loadingOperators, setLoadingOperators] = useState(false);
-  const [pickedOperatorId, setPickedOperatorId] = useState(null); // null = masuk sebagai Admin Puskesmas
+  const contohSlug = accountSlug(PKM_LIST[0] || "");
 
-  const filtered = PKM_LIST.filter((p) => p.toLowerCase().includes(query.toLowerCase()));
-
-  function pick(name) {
-    setHighlighted(name);
-    setPassword("");
-    setError("");
-    setPickedOperatorId(null);
-    setOperatorAccounts([]);
-    if (name && name !== DINAS_ENTITY) {
-      setLoadingOperators(true);
-      loadOperatorAccounts(accountSlug(name))
-        .then((list) => setOperatorAccounts(list))
-        .finally(() => setLoadingOperators(false));
-    }
-  }
-
-  function pickLoginMode(operatorId) {
-    setPickedOperatorId(operatorId);
-    setPassword("");
-    setError("");
-  }
-
+  /* Alur masuk (tanpa memilih Puskesmas): cukup nama pengguna (username) + kata sandi. Akun dikenali dari username:
+     - Admin Dinas       : "admindinas".
+     - Admin Puskesmas   : kode akun Puskesmas (mis. "kaliwates"), atau "admin-" diikuti kode akun.
+     - Operator Posyandu : nama operator yang didaftarkan Admin Puskesmas (huruf besar/kecil dan spasi diabaikan).
+       Bila nama yang sama dipakai di lebih dari satu Puskesmas, tulis "nama@kode-puskesmas". */
   async function doLogin() {
-    if (!highlighted) return;
+    const raw = username.trim();
+    if (!raw) {
+      setError("Masukkan nama pengguna (username) terlebih dahulu.");
+      return;
+    }
     if (!password) {
-      setError("Masukkan kata sandi akun terlebih dahulu.");
+      setError("Masukkan kata sandi terlebih dahulu.");
       return;
     }
     setBusy(true);
     setError("");
-    const slug = accountSlug(highlighted);
-    if (pickedOperatorId) {
-      const acc = operatorAccounts.find((o) => o.id === pickedOperatorId);
-      setBusy(false);
-      if (!acc || password !== acc.password) {
-        setError("Username atau kata sandi salah. Coba lagi atau hubungi Admin Puskesmas.");
+    const salah = "Nama pengguna atau kata sandi salah. Periksa kembali, atau hubungi Admin Puskesmas/Admin Dinas.";
+    const at = raw.lastIndexOf("@");
+    const namePart = at >= 0 ? raw.slice(0, at) : raw;
+    const pkmPart = at >= 0 ? raw.slice(at + 1) : "";
+    const u = slugifyPkm(namePart);
+    const uPkm = slugifyPkm(pkmPart);
+    let failPkm = "";
+    let failUser = "";
+    let failRole = "";
+    try {
+      if (!u) {
+        setBusy(false);
+        setError("Masukkan nama pengguna (username) terlebih dahulu.");
         return;
       }
-      onSelect(highlighted, acc.id);
-      return;
+      // 1) Admin Dinas
+      if (!pkmPart && u === accountSlug(DINAS_ENTITY)) {
+        failPkm = DINAS_ENTITY; failUser = "admindinas"; failRole = "Admin Dinas";
+        const validPwd = await getAccountPassword(accountSlug(DINAS_ENTITY));
+        if (password === validPwd) {
+          writeLoginMeta({ pkm: DINAS_ENTITY, user: failUser, role: failRole });
+          logActivity({ type: "login", pkm: DINAS_ENTITY, user: failUser, role: failRole, detail: "Berhasil masuk" });
+          setBusy(false);
+          onSelect(DINAS_ENTITY, null);
+          return;
+        }
+      } else {
+        // 2) Admin Puskesmas (username = kode akun Puskesmas)
+        const adminPkm = !pkmPart ? PKM_LIST.find((x) => accountSlug(x) === u || "admin-" + accountSlug(x) === u) : null;
+        if (adminPkm) {
+          const slug = accountSlug(adminPkm);
+          failPkm = adminPkm; failUser = slug; failRole = "Admin Puskesmas";
+          const validPwd = await getAccountPassword(slug);
+          if (password === validPwd) {
+            writeLoginMeta({ pkm: adminPkm, user: slug, role: failRole });
+            logActivity({ type: "login", pkm: adminPkm, user: slug, role: failRole, detail: "Berhasil masuk" });
+            setBusy(false);
+            onSelect(adminPkm, null);
+            return;
+          }
+        } else {
+          // 3) Operator Posyandu: cari di akun operator semua Puskesmas (atau hanya Puskesmas pada "nama@kode")
+          const cand = PKM_LIST.filter((x) => !pkmPart || accountSlug(x) === uPkm);
+          const lists = await Promise.all(cand.map((x) => loadOperatorAccounts(accountSlug(x)).then((l) => ({ pkm: x, list: l })).catch(() => ({ pkm: x, list: [] }))));
+          const matches = [];
+          lists.forEach((r) => r.list.forEach((o) => { if (slugifyPkm(o.name || "") === u) matches.push({ pkm: r.pkm, acc: o }); }));
+          const valid = matches.filter((m) => m.acc.password === password);
+          if (valid.length === 1) {
+            const m = valid[0];
+            const role = "Operator Posyandu";
+            writeLoginMeta({ pkm: m.pkm, user: m.acc.name || "Operator", role: role });
+            logActivity({ type: "login", pkm: m.pkm, user: m.acc.name || "Operator", role: role, detail: "Berhasil masuk" + (m.acc.posy ? " · Posyandu " + m.acc.posy : "") });
+            setBusy(false);
+            onSelect(m.pkm, m.acc.id);
+            return;
+          }
+          if (valid.length > 1) {
+            setBusy(false);
+            setError("Nama pengguna ini dipakai di lebih dari satu Puskesmas. Tulis dengan format nama@kode-puskesmas (mis. " + (namePart.trim() || "nama") + "@" + contohSlug + ").");
+            return;
+          }
+          if (matches.length > 0) {
+            failPkm = matches.length === 1 ? matches[0].pkm : "";
+            failUser = matches[0].acc.name || "Operator";
+            failRole = "Operator Posyandu";
+          }
+        }
+      }
+      logActivity({
+        type: "login-gagal",
+        pkm: failPkm,
+        user: failUser || "(username tidak dikenal)",
+        role: failRole,
+        detail: failUser ? "Kata sandi salah" : "Username tidak ditemukan",
+      });
+      setBusy(false);
+      setError(salah);
+    } catch (e) {
+      setBusy(false);
+      setError("Gagal memeriksa akun. Periksa koneksi lalu coba lagi.");
     }
-    const validPwd = await getAccountPassword(slug);
-    setBusy(false);
-    if (password !== validPwd) {
-      setError("Username atau kata sandi salah. Coba lagi atau hubungi Admin Dinas.");
-      return;
-    }
-    onSelect(highlighted, null);
   }
 
   return (
@@ -4512,7 +4726,7 @@ function PkmSelector({ onSelect, initial }) {
             <img src={DINAS_LOGO} alt="Logo Dinas Kesehatan Kabupaten Jember" className="brand-logo-img" />
           </div>
           <h1>Sistem Informasi Digital Imunisasi Kabupaten Jember</h1>
-          <div className="panel-note">Sistem Informasi Digital Imunisasi Kabupaten Jember — Masuk ke Akun (50 Puskesmas)</div>
+          <div className="panel-note">Sistem Informasi Digital Imunisasi Kabupaten Jember — Masuk ke Akun</div>
         </div>
 
         <button className="rekap-quick-btn" onClick={() => onSelect(REKAP_PUBLIK_ENTITY)}>
@@ -4520,88 +4734,32 @@ function PkmSelector({ onSelect, initial }) {
           <span className="rekap-quick-sub">Capaian per jenis imunisasi · skala 1 tahun · rincian 50 Puskesmas · tanpa login</span>
         </button>
 
-        <div className="dinas-option-block">
-          <div className="dinas-option-label">Level Kabupaten</div>
-          <button className={"dinas-option-btn" + (highlighted === DINAS_ENTITY ? " active-option" : "")} onClick={() => pick(DINAS_ENTITY)}>
-            <span className="dinas-option-title">{DINAS_LABEL}</span>
-            <span className="dinas-option-sub">Akun: {accountSlug(DINAS_ENTITY)} — Super Admin: rekap, kelola akses &amp; impor data 50 puskesmas</span>
-          </button>
+        <div className="login-field-block">
+          <label className="field">
+            <span>Nama pengguna (username)</span>
+            <LoginUsernameField
+              placeholder={"mis. " + contohSlug + " atau nama operator"}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && doLogin()}
+              onAutofillClear={() => setUsername("")}
+            />
+          </label>
+          <label className="field" style={{ marginTop: 10 }}>
+            <span>Kata sandi</span>
+            <PasswordField
+              placeholder="Kata sandi"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && doLogin()}
+              noAutofill
+              onAutofillClear={() => setPassword("")}
+            />
+          </label>
         </div>
-        <div className="dinas-option-label" style={{ marginTop: 4 }}>Level Puskesmas</div>
-
-        <input
-          className="input pkm-search"
-          placeholder="Cari nama puskesmas…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <div className="pkm-list">
-          {filtered.map((p) => (
-            <button
-              key={p}
-              className={"pkm-list-item" + (highlighted === p ? " active" : "")}
-              onClick={() => pick(p)}
-            >
-              {p}
-            </button>
-          ))}
-          {filtered.length === 0 && <div className="empty-cell">Tidak ditemukan.</div>}
-        </div>
-        {highlighted && highlighted !== DINAS_ENTITY && (
-          <div className="pkm-picked-note">Puskesmas terpilih: <strong>{highlighted}</strong></div>
-        )}
-
-        {highlighted && highlighted !== DINAS_ENTITY && (loadingOperators || operatorAccounts.length > 0) && (
-          <div className="login-field-block">
-            <span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "var(--ink-soft)", marginBottom: 6 }}>
-              Masuk sebagai
-            </span>
-            {loadingOperators ? (
-              <div className="panel-note">Memuat daftar akun…</div>
-            ) : (
-              <div className="pkm-list" style={{ maxHeight: 160 }}>
-                <button
-                  className={"pkm-list-item" + (pickedOperatorId === null ? " active" : "")}
-                  onClick={() => pickLoginMode(null)}
-                >
-                  👤 Admin Puskesmas (akses penuh)
-                </button>
-                {operatorAccounts.map((o) => (
-                  <button
-                    key={o.id}
-                    className={"pkm-list-item" + (pickedOperatorId === o.id ? " active" : "")}
-                    onClick={() => pickLoginMode(o.id)}
-                  >
-                    🧑‍⚕️ {o.name || "Operator"} · Posy {o.posy}{o.desa ? ` — ${o.desa}` : ""}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {highlighted && (
-          <div className="login-field-block">
-            <label className="field">
-              <span>
-                Kata sandi untuk{" "}
-                {pickedOperatorId
-                  ? (operatorAccounts.find((o) => o.id === pickedOperatorId)?.name || "Operator")
-                  : accountLabel(highlighted)}
-              </span>
-              <PasswordField
-                placeholder="Kata sandi"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && doLogin()}
-                autoFocus
-              />
-            </label>
-          </div>
-        )}
         {error && <div className="panel-note" style={{ color: "var(--danger)", marginTop: 6 }}>{error}</div>}
 
-        <button className="btn-primary pkm-continue" disabled={!highlighted || busy} onClick={doLogin}>
+        <button className="btn-primary pkm-continue" disabled={busy} onClick={doLogin}>
           {busy ? "Memeriksa…" : "🔒 Masuk"}
         </button>
 
@@ -4610,7 +4768,7 @@ function PkmSelector({ onSelect, initial }) {
         </button>
         {showHelp && (
           <div className="panel-note">
-            Username akun mengikuti nama wilayah (mis. Puskesmas dipilih dari daftar di atas). Setiap Puskesmas punya kata sandi awal masing-masing yang berbeda (bukan satu kata sandi yang sama untuk semua) — tanyakan ke Admin Dinas Kesehatan Kabupaten Jember bila belum tahu. Segera ganti kata sandi setelah masuk pertama kali melalui menu "Ubah Kata Sandi". Jika lupa, minta Admin Dinas mereset lewat menu Kelola Akun &amp; Akses. Akun Operator Posyandu didaftarkan sendiri oleh Admin Puskesmas melalui menu "Kelola Operator Posyandu" setelah masuk sebagai Admin — jika muncul di daftar "Masuk sebagai" tapi lupa kata sandi, minta Admin Puskesmas mereset. Impor data massal (basis sasaran, WUS, Ibu Hamil, Balita) hanya dapat dilakukan oleh akun Admin Dinas selaku Super Admin.
+            Masuk cukup dengan nama pengguna (username) dan kata sandi, tanpa memilih Puskesmas. Username Admin Puskesmas adalah kode akun Puskesmas (contoh: {contohSlug}); username Admin Dinas adalah "admindinas"; username Operator Posyandu adalah nama operator yang didaftarkan Admin Puskesmas. Bila nama operator yang sama dipakai di beberapa Puskesmas, tulis dengan format nama@kode-puskesmas (contoh: nama@{contohSlug}). Kata sandi awal berbeda untuk tiap Puskesmas — tanyakan ke Admin Dinas Kesehatan Kabupaten Jember bila belum tahu. Segera ganti kata sandi setelah masuk pertama kali melalui menu "Ubah Kata Sandi". Jika lupa, minta Admin Dinas mereset lewat menu Kelola Akun &amp; Akses; untuk akun Operator, minta Admin Puskesmas Anda.
           </div>
         )}
       </div>
@@ -4744,6 +4902,11 @@ function RootInner() {
   }
 
   function changePkm() {
+    const meta = readLoginMeta();
+    if (meta && meta.user) {
+      logActivity({ type: "logout", detail: "Keluar dari akun" });
+      writeLoginMeta(null);
+    }
     setPkm(null);
     setOperatorId(null);
     setDinasSwitchActive(false);
@@ -4758,6 +4921,7 @@ function RootInner() {
   // berada di dalam DinasView, yang hanya bisa dicapai lewat doLogin() yang sah.
   function switchAccountAsDinas(name) {
     if (!name || name === DINAS_ENTITY) return;
+    logActivity({ type: "ubah-akun", detail: "Admin Dinas membuka tampilan akun: " + name });
     setDinasSwitchActive(true);
     writeLocalSession("dinas-switch-active", true);
     choosePkm(name, null);
@@ -5521,6 +5685,7 @@ function DinasView({ onBack, onSwitchAccount }) {
 
   function handleBulkImport(catKey, label) {
     return (newRecs, mode, extraNote) => {
+      logActivity({ type: "aksi", detail: "Impor data " + label + (mode ? " (" + mode + ")" : "") + (newRecs && newRecs.length != null ? " · " + newRecs.length + " baris" : "") });
       setBulkImportMsg((prev) => ({ ...prev, [catKey]: extraNote || `Impor data ${label} selesai.` }));
       if (catKey === "bayi") reloadAllRecords(true);
     };
@@ -5691,6 +5856,7 @@ function DinasView({ onBack, onSwitchAccount }) {
             ["sasaran-desa", "Rekap Target Sasaran per Desa"],
             ["import-data", "Impor Data Basis"],
             ["helpdesk", "📚 Helpdesk & Modul"],
+            ["monitoring-akun", "🛡️ Monitoring Aktivitas Akun"],
             ["akun", "Kelola Akun & Akses"],
             ["basis", "⚙️ Generate Data Basis"],
             ["kosongkan-basis", "🗑️ Kosongkan Data Basis Sasaran"],
@@ -5840,6 +6006,7 @@ function DinasView({ onBack, onSwitchAccount }) {
 
         {dinasTab === "import-data" && <DinasImportWizard pkmLabel={DINAS_LABEL} makeHandler={handleBulkImport} />}
 
+        {dinasTab === "monitoring-akun" && <MonitoringAktivitasView />}
         {dinasTab === "akun" && (
           <>
             <div className="page-head">
@@ -5971,6 +6138,7 @@ function AccountsManager({ allRecords, onGoToBasis }) {
   async function resetPassword(slug) {
     try {
       await window.storage.delete(`account-pwd:${slug}`, false);
+      logActivity({ type: "aksi", detail: "Reset kata sandi akun " + slug + " ke default" });
       setToast("Kata sandi direset ke default");
       setTimeout(() => setToast(""), 1800);
     } catch (e) {}
@@ -6260,6 +6428,7 @@ function GenerateDataBasisPanel() {
    dipakai misalnya untuk membersihkan data uji-coba/dummy sebelum Puskesmas mulai entri data
    sesungguhnya. Data WUS, Ibu Hamil, dan Balita TIDAK ikut terhapus oleh fitur ini. */
 async function clearBasisSasaranForPkm(slug) {
+  logActivity({ type: "aksi", detail: "Kosongkan seluruh data basis sasaran bayi: " + slug });
   return window.storage.delete(`bayi-records:${slug}`, false);
 }
 
@@ -6275,6 +6444,7 @@ async function deleteBasisSasaranSelective(slug, shouldDelete) {
   const keep = list.filter((r) => !shouldDelete(r));
   const removed = list.length - keep.length;
   if (removed === 0) return { removed: 0, remaining: list.length };
+  logActivity({ type: "aksi", detail: "Hapus sebagian data basis sasaran (" + removed + " baris): " + slug });
   if (keep.length === 0) {
     await window.storage.delete(key, false);
   } else {
@@ -9365,6 +9535,18 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
       setError("Nama/keterangan operator wajib diisi (mis. nama bidan/petugas posyandu).");
       return;
     }
+    {
+      const uname = slugifyPkm(name);
+      const reserved = uname === accountSlug(DINAS_ENTITY) || PKM_LIST.some((x) => accountSlug(x) === uname || "admin-" + accountSlug(x) === uname);
+      if (!uname || reserved) {
+        setError("Nama operator tidak boleh sama dengan username Admin (kode akun Puskesmas, \"admin-kode\", atau \"admindinas\"). Gunakan nama lain.");
+        return;
+      }
+      if ((list || []).some((o) => slugifyPkm(o.name || "") === uname)) {
+        setError("Nama operator ini sudah dipakai di Puskesmas Anda. Gunakan nama yang berbeda agar username tidak kembar.");
+        return;
+      }
+    }
     if (!posy) {
       setError("Pilih Posyandu yang ditugaskan.");
       return;
@@ -9386,6 +9568,7 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
     const saved = await saveOperatorAccounts(slug, next);
     setBusy(false);
     if (saved) {
+      logActivity({ type: "aksi", detail: "Daftarkan akun Operator " + rec.name + " · Posyandu " + rec.posy + " (" + slug + ")" });
       setList(next);
       setName("");
       setPwd(defaultOperatorPassword());
@@ -9400,6 +9583,7 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
     const next = (list || []).map((o) => (o.id === id ? { ...o, password: defaultOperatorPassword() } : o));
     const saved = await saveOperatorAccounts(slug, next);
     if (saved) {
+      logActivity({ type: "aksi", detail: "Reset kata sandi Operator " + ((list || []).find((o) => o.id === id) || {}).name + " (" + slug + ")" });
       setList(next);
       setResetId(null);
       flash("Kata sandi direset ke default: " + defaultOperatorPassword());
@@ -9410,6 +9594,7 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
     const next = (list || []).filter((o) => o.id !== id);
     const saved = await saveOperatorAccounts(slug, next);
     if (saved) {
+      logActivity({ type: "aksi", detail: "Hapus akun Operator " + ((list || []).find((o) => o.id === id) || {}).name + " (" + slug + ")" });
       setList(next);
       setConfirmDeleteId(null);
       flash("Akun Operator dihapus");
@@ -9452,8 +9637,9 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
           <h2>Daftarkan Akun Operator Baru</h2>
           <span className="panel-note">
             Setiap akun Operator terkunci ke satu Posyandu (dan opsional Desa/Kelurahan) sehingga petugas hanya
-            bisa melihat/menginput data posyandu yang ditugaskan. Operator memilih akunnya sendiri dari daftar
-            saat masuk (tidak perlu mengetik username) lalu memasukkan kata sandi ini.
+            bisa melihat/menginput data posyandu yang ditugaskan. Operator masuk tanpa memilih Puskesmas: cukup mengetik
+            nama operator ini sebagai username (huruf besar/kecil dan spasi diabaikan) beserta kata sandi di bawah. Bila nama yang sama
+            ada di Puskesmas lain, operator menulis "nama@kode-Puskesmas Anda".
           </span>
         </div>
         <div className="form-grid">
@@ -9636,7 +9822,7 @@ function ChangePasswordPanel({ slug, label, operatorId, onDone, onCancel }) {
       list[idx] = { ...list[idx], password: next };
       const saved = await saveOperatorAccounts(slug, list);
       setBusy(false);
-      if (saved) setOk(true);
+      if (saved) { logActivity({ type: "aksi", detail: "Ubah kata sandi sendiri (Operator)" }); setOk(true); }
       else setError("Gagal menyimpan kata sandi baru.");
       return;
     }
@@ -9648,6 +9834,7 @@ function ChangePasswordPanel({ slug, label, operatorId, onDone, onCancel }) {
     }
     try {
       await window.storage.set(`account-pwd:${slug}`, next, false);
+      logActivity({ type: "aksi", detail: "Ubah kata sandi akun " + slug });
       setOk(true);
     } catch (e) {
       setError("Gagal menyimpan kata sandi baru.");
@@ -12495,6 +12682,248 @@ function DinasRekapPerDesa({ allRecords, today }) {
    mengajukan / memutuskan, dan alasan penolakan. Pindah dalam Puskesmas & ke luar Kabupaten tidak memakai persetujuan,
    jejaknya ada di riwayat mutasi pada data sasaran masing-masing. */
 const MUTASI_BATAS_HARI = 7;
+/* ---------- Monitoring Aktivitas Akun (HANYA Admin Dinas) ----------
+   Komponen ini hanya dipasang di DinasView (menu Dinas), yang hanya bisa dicapai setelah login Admin Dinas.
+   Akun Puskesmas/Operator tidak memiliki menu ini. */
+const ACT_TYPE_LABEL = { "login": "Masuk", "login-gagal": "Gagal masuk", "logout": "Keluar", "ubah-akun": "Buka akun PKM", "aksi": "Aksi penting" };
+function fmtWib(iso) {
+  try {
+    return new Date(iso).toLocaleString("id-ID", { timeZone: "Asia/Jakarta", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }).replace(/\./g, ":") + " WIB";
+  } catch (e) { return String(iso || ""); }
+}
+function MonitoringAktivitasView() {
+  const meta = readLoginMeta();
+  const allowed = !meta || meta.pkm === DINAS_ENTITY; // hanya sesi Admin Dinas
+  const [days, setDays] = useState(7);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [errCount, setErrCount] = useState(0);
+  const [loadFail, setLoadFail] = useState(false);
+  const [fPkm, setFPkm] = useState("Semua");
+  const [fType, setFType] = useState("Semua");
+  const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
+  const [confirmPurge, setConfirmPurge] = useState(false);
+  const [msg, setMsg] = useState("");
+  const PAGE = 50;
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setLoadFail(false);
+    try {
+      const r = await loadActivityLog(days);
+      setEvents(r.events);
+      setErrCount(r.errors);
+    } catch (e) {
+      setLoadFail(true);
+    }
+    setLoading(false);
+  }, [days]);
+  useEffect(() => { if (allowed) reload(); }, [reload, allowed]);
+  useEffect(() => { setPage(1); }, [fPkm, fType, q, days]);
+
+  if (!allowed) {
+    return <div className="panel"><div className="panel-note">Akses ditolak. Menu ini hanya untuk Admin Dinas.</div></div>;
+  }
+
+  const nowMs = Date.now();
+  const todayKey = activityDayKey(nowMs);
+  const last24 = events.filter((e) => nowMs - new Date(e.t).getTime() <= 86400000);
+  const loginToday = events.filter((e) => e.type === "login" && activityDayKey(new Date(e.t).getTime()) === todayKey).length;
+  const failToday = events.filter((e) => e.type === "login-gagal" && activityDayKey(new Date(e.t).getTime()) === todayKey).length;
+  const akunAktif24 = new Set(last24.filter((e) => e.type === "login").map((e) => (e.pkm || "") + "|" + (e.user || ""))).size;
+  const perangkat24 = new Set(last24.filter((e) => e.type === "login").map((e) => e.dev)).size;
+
+  // Ringkasan per akun
+  const accMap = new Map();
+  events.forEach((e) => {
+    if (!e.pkm && !e.user) return;
+    const key = (e.pkm || "-") + "|" + (e.user || "-");
+    if (!accMap.has(key)) accMap.set(key, { pkm: e.pkm || "-", user: e.user || "-", role: e.role || "", last: null, lastLogin: null, logins: 0, fails: 0, fails24: 0, devs: new Set() });
+    const a = accMap.get(key);
+    if (!a.last || e.t > a.last) a.last = e.t;
+    if (e.type === "login") { a.logins++; a.devs.add(e.dev); if (!a.lastLogin || e.t > a.lastLogin) { a.lastLogin = e.t; a.ua = e.ua; a.dev = e.dev; } }
+    if (e.type === "login-gagal") { a.fails++; if (nowMs - new Date(e.t).getTime() <= 86400000) a.fails24++; }
+  });
+  const accounts = Array.from(accMap.values()).sort((x, y) => String(y.last).localeCompare(String(x.last)));
+  const pkmSeen = new Set(events.filter((e) => e.type === "login").map((e) => e.pkm));
+  const belumLogin = PKM_LIST.filter((p) => !pkmSeen.has(p));
+  const pkmOptions = Array.from(new Set(events.map((e) => e.pkm).filter(Boolean))).sort();
+
+  const ql = q.trim().toLowerCase();
+  const filtered = events.filter((e) =>
+    (fPkm === "Semua" || e.pkm === fPkm) &&
+    (fType === "Semua" || e.type === fType) &&
+    (!ql || [e.pkm, e.user, e.role, e.detail, e.dev, e.ua].join(" ").toLowerCase().indexOf(ql) !== -1)
+  );
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE));
+  const shown = filtered.slice((page - 1) * PAGE, page * PAGE);
+
+  function exportCsv() {
+    const esc = (v) => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+    const head = ["Waktu (WIB)", "Jenis", "Akun/Puskesmas", "Pengguna", "Peran", "Keterangan", "ID Perangkat", "Browser · OS"];
+    const rows = filtered.map((e) => [fmtWib(e.t), ACT_TYPE_LABEL[e.type] || e.type, e.pkm, e.user, e.role, e.detail, e.dev, e.ua]);
+    const csv = "\ufeff" + [head].concat(rows).map((r) => r.map(esc).join(",")).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "log-aktivitas-akun-" + todayKey + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+  async function doPurge() {
+    setConfirmPurge(false);
+    try {
+      const n = await purgeActivityLog(ACTIVITY_RETENTION_DAYS);
+      setMsg(n > 0 ? "Log lebih dari " + ACTIVITY_RETENTION_DAYS + " hari dihapus (" + n + " hari-log)." : "Tidak ada log yang lebih lama dari " + ACTIVITY_RETENTION_DAYS + " hari.");
+    } catch (e) { setMsg("Gagal menghapus log lama."); }
+    setTimeout(() => setMsg(""), 3500);
+    reload();
+  }
+
+  return (
+    <div className="stack">
+      <div className="panel">
+        <div className="panel-head">
+          <h2>🛡️ Monitoring Aktivitas Akun</h2>
+          <span className="panel-note">
+            Riwayat masuk, gagal masuk, keluar, dan aksi penting seluruh akun (Admin Dinas, Admin Puskesmas, Operator Posyandu).
+            Menu ini hanya tampil untuk Admin Dinas. Kata sandi tidak pernah dicatat; alamat IP tidak tersedia di aplikasi ini,
+            sehingga perangkat dikenali lewat ID perangkat acak + jenis browser/OS.
+          </span>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            <span>Periode</span>
+            <select className="input" value={days} onChange={(e) => setDays(Number(e.target.value))}>
+              <option value={1}>Hari ini</option>
+              <option value={7}>7 hari terakhir</option>
+              <option value={30}>30 hari terakhir</option>
+              <option value={0}>Semua (maks. {ACTIVITY_RETENTION_DAYS} hari tersimpan)</option>
+            </select>
+          </label>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <button className="btn-secondary" onClick={reload} disabled={loading}>{loading ? "Memuat…" : "🔄 Muat ulang"}</button>
+            <button className="btn-secondary" onClick={exportCsv} disabled={loading || filtered.length === 0}>⬇️ Unduh CSV</button>
+            {confirmPurge ? (
+              <>
+                <span className="panel-note" style={{ color: "var(--danger)" }}>Hapus log &gt; {ACTIVITY_RETENTION_DAYS} hari?</span>
+                <button className="btn-secondary" onClick={doPurge}>Ya, hapus</button>
+                <button className="btn-secondary" onClick={() => setConfirmPurge(false)}>Batal</button>
+              </>
+            ) : (
+              <button className="btn-secondary" onClick={() => setConfirmPurge(true)}>🗑️ Hapus log lama</button>
+            )}
+          </div>
+        </div>
+        {msg && <div className="panel-note" style={{ marginTop: 8 }}>{msg}</div>}
+        {loadFail && <div className="panel-note" style={{ color: "var(--danger)", marginTop: 8 }}>Gagal memuat log dari server. Coba muat ulang.</div>}
+        {errCount > 0 && <div className="panel-note" style={{ color: "var(--danger)", marginTop: 8 }}>{errCount} hari-log gagal dibaca; angka di bawah bisa kurang lengkap. Coba muat ulang.</div>}
+      </div>
+
+      <div className="stat-grid">
+        <StatCard label="Berhasil masuk hari ini" value={loginToday} />
+        <StatCard label="Gagal masuk hari ini" value={failToday} accent={failToday > 0} />
+        <StatCard label="Akun aktif 24 jam" value={akunAktif24} sub={perangkat24 + " perangkat berbeda"} />
+        <StatCard label="Total catatan (periode)" value={events.length} />
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h3>Ringkasan per Akun</h3>
+          <span className="panel-note">Diurutkan dari aktivitas terbaru. ⚠️ = 5 kali gagal masuk atau lebih dalam 24 jam terakhir.</span>
+        </div>
+        <div className="table-wrap">
+          <table className="table small">
+            <thead>
+              <tr><th>Akun / Puskesmas</th><th>Pengguna</th><th>Peran</th><th>Aktivitas terakhir</th><th>Masuk terakhir</th><th>Perangkat terakhir</th><th>Jml masuk</th><th>Gagal</th></tr>
+            </thead>
+            <tbody>
+              {accounts.length === 0 && <tr><td colSpan={8} className="empty-cell">{loading ? "Memuat…" : "Belum ada aktivitas tercatat pada periode ini."}</td></tr>}
+              {accounts.map((a) => (
+                <tr key={a.pkm + "|" + a.user}>
+                  <td>{a.pkm}</td>
+                  <td>{a.user}</td>
+                  <td>{a.role || "-"}</td>
+                  <td>{fmtWib(a.last)}</td>
+                  <td>{a.lastLogin ? fmtWib(a.lastLogin) : "-"}</td>
+                  <td>{a.lastLogin ? (a.dev || "-") + " · " + (a.ua || "") : "-"}{a.devs.size > 1 ? " (" + a.devs.size + " perangkat)" : ""}</td>
+                  <td>{a.logins}</td>
+                  <td>{a.fails24 >= 5 ? "⚠️ " : ""}{a.fails}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!loading && belumLogin.length > 0 && (
+          <details style={{ marginTop: 10 }}>
+            <summary className="panel-note" style={{ cursor: "pointer" }}>{belumLogin.length} Puskesmas belum tercatat masuk pada periode ini</summary>
+            <div className="panel-note" style={{ marginTop: 6 }}>{belumLogin.join(", ")}</div>
+          </details>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h3>Log Aktivitas</h3>
+          <span className="panel-note">{filtered.length} catatan sesuai filter.</span>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            <span>Puskesmas / Akun</span>
+            <select className="input" value={fPkm} onChange={(e) => setFPkm(e.target.value)}>
+              <option value="Semua">Semua</option>
+              {pkmOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span>Jenis</span>
+            <select className="input" value={fType} onChange={(e) => setFType(e.target.value)}>
+              <option value="Semua">Semua</option>
+              {Object.keys(ACT_TYPE_LABEL).map((k) => <option key={k} value={k}>{ACT_TYPE_LABEL[k]}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span>Cari</span>
+            <input className="input" placeholder="pengguna, keterangan, perangkat…" value={q} onChange={(e) => setQ(e.target.value)} />
+          </label>
+        </div>
+        <div className="table-wrap">
+          <table className="table small">
+            <thead>
+              <tr><th>Waktu</th><th>Jenis</th><th>Akun / Puskesmas</th><th>Pengguna</th><th>Peran</th><th>Keterangan</th><th>Perangkat</th></tr>
+            </thead>
+            <tbody>
+              {shown.length === 0 && <tr><td colSpan={7} className="empty-cell">{loading ? "Memuat…" : "Tidak ada catatan."}</td></tr>}
+              {shown.map((e) => (
+                <tr key={e.id}>
+                  <td>{fmtWib(e.t)}</td>
+                  <td style={e.type === "login-gagal" ? { color: "var(--danger)", fontWeight: 600 } : undefined}>{ACT_TYPE_LABEL[e.type] || e.type}</td>
+                  <td>{e.pkm || "-"}</td>
+                  <td>{e.user || "-"}</td>
+                  <td>{e.role || "-"}</td>
+                  <td>{e.detail}</td>
+                  <td>{e.dev} · {e.ua}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {pages > 1 && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
+            <button className="btn-secondary" disabled={page <= 1} onClick={() => setPage(page - 1)}>‹ Sebelumnya</button>
+            <span className="panel-note">Halaman {page} / {pages}</span>
+            <button className="btn-secondary" disabled={page >= pages} onClick={() => setPage(page + 1)}>Berikutnya ›</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DinasMutasiView() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
