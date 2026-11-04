@@ -4142,6 +4142,9 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
               ⚙
             </button>
           )}
+          <button className="role-edit-btn" onClick={() => setView("profil")} title="Edit profil">
+            👤
+          </button>
           <button className="role-edit-btn" onClick={() => setView("password")} title="Ubah kata sandi akun">
             🔑
           </button>
@@ -4159,7 +4162,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
             ["dropout-bnba", "Sasaran Dropout (BNBA)"],
             ...(!isOperator ? [["mutasi", `🔁 Mutasi Sasaran${mutasiMasuk.filter((q) => q.status === "menunggu").length > 0 ? ` (${mutasiMasuk.filter((q) => q.status === "menunggu").length} menunggu)` : ""}`]] : []),
             ["helpdesk", `📚 Helpdesk & Modul${hd.unread > 0 ? ` (${hd.unread} baru)` : ""}`],
-            ...(!operatorId && role === "admin" ? [["operators", "👥 Kelola Operator Posyandu"]] : []),
+            { group: "Akun Saya", items: [["profil", "👤 Edit Profil"], ["password", "🔑 Ubah Kata Sandi"], ...(!operatorId && role === "admin" ? [["operators", "👥 Kelola Operator Posyandu"]] : [])] },
           ].map((item) => item.group ? (
             <NavGroup key={item.group} label={item.group} items={item.items} current={view} onSelect={goView} pending={navPending} />
           ) : (
@@ -4225,6 +4228,18 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
             desaList={desaList}
             onCancel={() => setView("dashboard")}
           />
+        )}
+        {view === "profil" && (
+          <>
+            <div className="page-head">
+              <div>
+                <div className="eyebrow">{pkm}</div>
+                <h1>Edit Profil</h1>
+                <div className="panel-note">Data pemegang akun {operatorId ? "Operator" : "Puskesmas"}.</div>
+              </div>
+            </div>
+            <EditProfilePanel slug={slug} label={pkm} operatorId={operatorId} />
+          </>
         )}
         {view === "password" && (
           <ChangePasswordPanel
@@ -5825,7 +5840,6 @@ function DinasView({ onBack, onSwitchAccount }) {
             <div className="brand-sub">Dinas Kesehatan, P2KB</div>
           </div>
         </div>
-        <LogoutButton onLogout={onBack} label="Admin Dinas Kesehatan" />
         <button className="nav-btn" onClick={() => reloadAllRecords(true)} disabled={refreshing}>
           {refreshing ? "Memuat ulang…" : "🔄 Muat Ulang Data"}
         </button>
@@ -5848,19 +5862,18 @@ function DinasView({ onBack, onSwitchAccount }) {
         <nav className="nav">
           {[
             ["rekap", "Rekap Capaian"],
-            { group: "Laporan", items: [["kejar-rutin", "Laporan Kejar Rutin"], ["kejar-murni", "Laporan Kejar Murni"], ["laporan-bulanan", "Laporan Bulanan"], ["unduh-laporan", "Unduh Laporan (Excel/PDF)"]] },
             ["rekap-per-desa", "🏘️ Rekap per Desa (Seluruh PKM)"],
+            ["sasaran-desa", "Rekap Target Sasaran per Desa"],
             ["kendali-sasaran", "🎯 Tabel Kendali Sasaran"],
             ["dropout-bnba", "📤 Sasaran Dropout (BNBA)"],
             ["mutasi-dinas", "🔁 Pantauan Mutasi Sasaran"],
-            ["sasaran-desa", "Rekap Target Sasaran per Desa"],
+            { group: "Laporan", items: [["kejar-rutin", "Laporan Kejar Rutin"], ["kejar-murni", "Laporan Kejar Murni"], ["laporan-bulanan", "Laporan Bulanan"], ["unduh-laporan", "Unduh Laporan (Excel/PDF)"]] },
             ["import-data", "Impor Data Basis"],
-            ["helpdesk", "📚 Helpdesk & Modul"],
-            ["monitoring-akun", "🛡️ Monitoring Aktivitas Akun"],
-            ["akun", "Kelola Akun & Akses"],
             ["basis", "⚙️ Generate Data Basis"],
             ["kosongkan-basis", "🗑️ Kosongkan Data Basis Sasaran"],
-            ["password", "🔑 Ubah Kata Sandi"],
+            { group: "Kelola Akun & Akses", items: [["akun", "Kelola Akun & Akses"], ["profil", "👤 Edit Profil"], ["password", "🔑 Ubah Kata Sandi"]] },
+            ["monitoring-akun", "🛡️ Monitoring Aktivitas Akun"],
+            ["helpdesk", "📚 Helpdesk & Modul"],
           ].map((item) => item.group ? (
             <NavGroup key={item.group} label={item.group} items={item.items} current={dinasTab} onSelect={goDinasTab} pending={navPending} />
           ) : (
@@ -5868,6 +5881,7 @@ function DinasView({ onBack, onSwitchAccount }) {
               {navPending === item[0] && <NavSpinner />}{item[1]}
             </button>
           ))}
+          <LogoutButton onLogout={onBack} label="Admin Dinas Kesehatan" />
         </nav>
         <div className="sidebar-foot">
           {total} bayi terdata dari {pkmWithData.length} dari 50 puskesmas
@@ -6043,6 +6057,19 @@ function DinasView({ onBack, onSwitchAccount }) {
               </div>
             </div>
             <ClearBasisSasaranPanel allRecords={allRecords} onCleared={() => reloadAllRecords(true)} />
+          </>
+        )}
+
+        {dinasTab === "profil" && (
+          <>
+            <div className="page-head">
+              <div>
+                <div className="eyebrow">Kabupaten Jember</div>
+                <h1>Edit Profil</h1>
+                <div className="panel-note">Data pemegang akun Admin Dinas.</div>
+              </div>
+            </div>
+            <EditProfilePanel slug={accountSlug(DINAS_ENTITY)} label={accountLabel(DINAS_ENTITY)} />
           </>
         )}
 
@@ -9782,6 +9809,176 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
 }
 
 /* ---------- Ganti Kata Sandi ---------- */
+/* ---------- Edit Profil (Data Diri ASN pemegang akun) — disimpan di `account-profile:<slug>` ---------- */
+// [kunci, label, lebar kolom (dari 12), tipe, opsi (untuk select)]
+const PROFILE_ROWS = [
+  [["gelar_depan", "Gelar Depan", 3], ["nama", "Nama Lengkap", 6], ["gelar_belakang", "Gelar Belakang", 3]],
+  [["tgl_lahir", "Tanggal Lahir", 4, "date"], ["jk", "Jenis Kelamin", 4, "select", ["Laki-Laki", "Perempuan"]], ["status_pegawai", "Status Pegawai", 4, "select", ["PNS", "PPPK", "Non-ASN"]]],
+  [["judul_jabatan", "Judul Jabatan", 12]],
+  [["profesi", "Profesi", 4], ["pangkat", "Pangkat", 4], ["jabatan_satker", "Jabatan dalam Satuan Kerja", 4]],
+  [["satuan_kerja", "Satuan Kerja", 12]],
+];
+const PROFILE_CONTACT_ROW = [["nip", "NIP", 4], ["hp", "No. HP / WhatsApp", 4, "tel"], ["email", "Email", 4, "email"]];
+const PROFILE_KEYS = [].concat(...PROFILE_ROWS, PROFILE_CONTACT_ROW).map((f) => f[0]);
+const PROFILE_PHOTO_MAX_BYTES = 1024 * 1024; // batas unggah foto profil: 1 MB
+function readImageResized(file, maxSide) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error("read"));
+    fr.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("img"));
+      img.onload = () => {
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(img.width * scale));
+        c.height = Math.max(1, Math.round(img.height * scale));
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL("image/jpeg", 0.85));
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+const PROFILE_CSS = `
+.prof-card{background:#fff;border-radius:10px;box-shadow:0 1px 6px rgba(30,40,60,.10);margin-bottom:18px;overflow:hidden}
+.prof-card-head{padding:16px 20px;border-bottom:1px solid #e3e8ef;font-size:20px;font-weight:600;color:#2b3440}
+.prof-card-body{padding:18px 20px 22px;background:#f7f9fc}
+.prof-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px 18px;margin-bottom:14px}
+.prof-grid:last-child{margin-bottom:0}
+.prof-f{display:flex;flex-direction:column;gap:7px;min-width:0}
+.prof-f>span{font-size:14px;font-weight:500;color:#5b6573}
+.prof-f input,.prof-f select{height:40px;padding:0 16px;border:1px solid #e3e8ef;border-radius:6px;background:#eef2f7;color:#2b3440;font-size:16px;font-family:inherit;width:100%;box-sizing:border-box}
+.prof-f input:focus,.prof-f select:focus{outline:2px solid #c2507d55;background:#fff}
+.prof-photo{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.prof-avatar{width:104px;height:104px;border-radius:50%;overflow:hidden;background:#e3e8ef;display:flex;align-items:center;justify-content:center;font-size:44px;flex:none}
+@media(max-width:760px){.prof-grid>.prof-f{grid-column:span 12!important}}
+`;
+function EditProfilePanel({ slug, label, operatorId }) {
+  const storeKey = operatorId ? `account-profile:${slug}:${operatorId}` : `account-profile:${slug}`;
+  const [form, setForm] = useState({ foto: "" });
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    setLoaded(false);
+    (async () => {
+      try {
+        const res = await window.storage.get(storeKey, false);
+        if (res && res.value) {
+          const d = JSON.parse(res.value);
+          // kompatibel dengan data profil versi lama (jabatan)
+          if (!d.judul_jabatan && d.jabatan) d.judul_jabatan = d.jabatan;
+          setForm((f) => ({ ...f, ...d }));
+        }
+      } catch (e) {}
+      setLoaded(true);
+    })();
+  }, [storeKey]);
+
+  async function pickPhoto(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setMsg(null);
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) { setMsg({ err: true, text: "Format foto harus JPG, PNG, atau WebP." }); return; }
+    if (file.size > PROFILE_PHOTO_MAX_BYTES) { setMsg({ err: true, text: `Ukuran foto ${(file.size / 1048576).toFixed(2)} MB melebihi batas 1 MB.` }); return; }
+    try {
+      const data = await readImageResized(file, 400);
+      setForm((f) => ({ ...f, foto: data }));
+    } catch (err) {
+      setMsg({ err: true, text: "Foto tidak dapat dibaca. Coba file lain." });
+    }
+  }
+
+  async function save() {
+    setMsg(null);
+    if (!(form.nama || "").trim()) { setMsg({ err: true, text: "Nama lengkap wajib diisi." }); return; }
+    if (form.email && !/^\S+@\S+\.\S+$/.test(form.email.trim())) { setMsg({ err: true, text: "Format email tidak valid." }); return; }
+    setBusy(true);
+    try {
+      const clean = { foto: form.foto || "" };
+      PROFILE_KEYS.forEach((k) => { clean[k] = (form[k] || "").trim(); });
+      await window.storage.set(storeKey, JSON.stringify(clean), false);
+      logActivity({ type: "aksi", detail: "Ubah profil akun " + slug + (operatorId ? " (Operator)" : "") });
+      setMsg({ err: false, text: "Profil berhasil disimpan." });
+    } catch (e) {
+      setMsg({ err: true, text: "Gagal menyimpan profil." });
+    }
+    setBusy(false);
+  }
+
+  function renderField([k, lbl, span, type, opts]) {
+    const common = { value: form[k] || "", onChange: (e) => setForm((f) => ({ ...f, [k]: e.target.value })) };
+    return (
+      <label key={k} className="prof-f" style={{ gridColumn: `span ${span}` }}>
+        <span>{lbl}</span>
+        {type === "select" ? (
+          <select {...common}>
+            <option value=""></option>
+            {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+        ) : (
+          <input type={type || "text"} {...common} />
+        )}
+      </label>
+    );
+  }
+
+  return (
+    <>
+      <style>{PROFILE_CSS}</style>
+      {!loaded ? (
+        <div className="panel-note">Memuat…</div>
+      ) : (
+        <>
+          <div className="prof-card">
+            <div className="prof-card-head">Foto Profil</div>
+            <div className="prof-card-body">
+              <div className="prof-photo">
+                <div className="prof-avatar">
+                  {form.foto ? <img src={form.foto} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span aria-hidden="true">👤</span>}
+                </div>
+                <div>
+                  <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={pickPhoto} style={{ display: "none" }} />
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button type="button" className="btn-secondary" onClick={() => fileRef.current && fileRef.current.click()}>{form.foto ? "Ganti Foto" : "Unggah Foto"}</button>
+                    {form.foto && <button type="button" className="btn-secondary" onClick={() => setForm((f) => ({ ...f, foto: "" }))}>Hapus Foto</button>}
+                  </div>
+                  <div className="panel-note" style={{ marginTop: 6 }}>JPG, PNG, atau WebP. Maksimal 1 MB.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="prof-card">
+            <div className="prof-card-head">Data Diri ASN</div>
+            <div className="prof-card-body">
+              {PROFILE_ROWS.map((row, i) => (
+                <div key={i} className="prof-grid">{row.map(renderField)}</div>
+              ))}
+            </div>
+          </div>
+
+          <div className="prof-card">
+            <div className="prof-card-head">Kontak</div>
+            <div className="prof-card-body">
+              <div className="prof-grid">{PROFILE_CONTACT_ROW.map(renderField)}</div>
+            </div>
+          </div>
+
+          {msg && <div className="panel-note" style={{ color: msg.err ? "var(--danger)" : "var(--mint)", marginBottom: 10, fontWeight: 600 }}>{msg.text}</div>}
+          <button className="btn-primary" disabled={busy} onClick={save}>{busy ? "Menyimpan…" : "Simpan Profil"}</button>
+          <div className="panel-note" style={{ marginTop: 8 }}>Akun: {label} · Username: {slug}</div>
+        </>
+      )}
+    </>
+  );
+}
+
 function ChangePasswordPanel({ slug, label, operatorId, onDone, onCancel }) {
   const [cur, setCur] = useState("");
   const [next, setNext] = useState("");
