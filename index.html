@@ -3608,6 +3608,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
   const [toast, setToast] = useState("");
   const [role, setRole] = useState("admin");
   const [assignedPosy, setAssignedPosy] = useState("");
+  const [assignedPosys, setAssignedPosys] = useState([]); // semua posyandu tugas operator (bisa >1)
   const [assignedDesa, setAssignedDesa] = useState("");
   const [accessLoaded, setAccessLoaded] = useState(false);
   const today = useMemo(() => new Date(), []);
@@ -3625,12 +3626,15 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
           const acc = list.find((o) => o.id === operatorId);
           if (acc) {
             setRole("operator");
-            setAssignedPosy(acc.posy || "");
+            const arr = operatorPosyArray(acc);
+            setAssignedPosys(arr);
+            setAssignedPosy(arr[0] || "");
             setAssignedDesa(acc.desa || "");
           } else {
             // Akun operator sudah dihapus oleh Admin Puskesmas — paksa keluar.
             setRole("operator");
             setAssignedPosy("");
+            setAssignedPosys([]);
             setAssignedDesa("");
             onChangePkm();
           }
@@ -3648,6 +3652,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
         const d = await window.storage.get(`assigned-desa:${slug}`, false);
         setRole(r && r.value ? r.value : "admin");
         setAssignedPosy(p && p.value ? p.value : "");
+        setAssignedPosys([]);
         setAssignedDesa(d && d.value ? d.value : "");
       } catch (e) {
         setRole("admin");
@@ -3684,6 +3689,10 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
   // operator tetap terkunci ke 1 posyandu yang ditugaskan seperti semula.
   const operatorPosyOptions = useMemo(() => {
     if (!isOperator) return [];
+    // Operator dengan beberapa posyandu tugas: persis posyandu yang ditugaskan.
+    if (operatorId && assignedPosys.length > 1) {
+      return [...assignedPosys].sort((a, b) => a.localeCompare(b, "id", { numeric: true }));
+    }
     if (assignedDesa && records) {
       const set = new Set();
       basisRecords.forEach((r) => {
@@ -3694,9 +3703,11 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
       }
     }
     return [assignedPosy];
-  }, [isOperator, assignedDesa, assignedPosy, records, basisRecords]);
+  }, [isOperator, operatorId, assignedPosys, assignedDesa, assignedPosy, records, basisRecords]);
 
   useEffect(() => {
+    // "Semua" diizinkan bila operator memegang >1 posyandu (berarti: semua posyandu tugasnya).
+    if (isOperator && operatorPosyOptions.length > 1 && posyFilter === "Semua") return;
     if (isOperator && !operatorPosyOptions.includes(posyFilter)) {
       setPosyFilter(operatorPosyOptions[0] || assignedPosy);
     }
@@ -3888,11 +3899,12 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
   const filtered = useMemo(() => {
     if (!records) return [];
     return basisRecords.filter((r) => {
+      if (isOperator && !operatorPosyOptions.includes(String(r.posy))) return false;
       if (posyFilter !== "Semua" && String(r.posy) !== posyFilter) return false;
       if (search && !String(r.nama).toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
-  }, [records, basisRecords, posyFilter, search]);
+  }, [records, basisRecords, posyFilter, search, isOperator, operatorPosyOptions]);
 
   // Akun Operator hanya boleh melihat sasaran pada Posyandu yang ditugaskan di SEMUA menu (Manual Book Bab 12).
   const scopeOperator = (list) => (isOperator ? list.filter((r) => operatorPosyOptions.includes(String(r.posy))) : list);
@@ -4133,9 +4145,9 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
         )}
         <div className="role-badge-row">
           <span className={"role-badge" + (isOperator ? " operator" : "")}>
-            {operatorId
-              ? `Operator · Posy ${assignedPosy}`
-              : (isOperator ? `Operator · Posy ${assignedPosy}` : "Admin (akses penuh)")}
+            {isOperator
+              ? `Operator · Posy ${operatorPosyOptions.length > 1 ? operatorPosyOptions.join(", ") : assignedPosy}`
+              : operatorId ? `Operator · Posy ${assignedPosy}` : "Admin (akses penuh)"}
           </span>
           {!operatorId && (
             <button className="role-edit-btn" onClick={() => setView("access")} title="Atur peran & kunci filter">
@@ -4192,7 +4204,8 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
         {toast && <div className="toast">{toast}</div>}
         {view === "dashboard" && (
           <Dashboard
-            records={basisRecords}
+            records={scopeOperator(basisRecords)}
+            operatorPosyOptions={operatorPosyOptions}
             today={today}
             posyList={posyList}
             posyFilter={posyFilter}
@@ -4548,6 +4561,14 @@ async function purgeActivityLog(olderThanDays) {
 function defaultOperatorPassword() {
   return "operator2026";
 }
+/* Daftar Posyandu yang ditugaskan pada akun Operator. Akun lama hanya punya `posy` (1 posyandu);
+   akun baru menyimpan `posys` (array) agar 1 operator/bidan bisa memegang beberapa posyandu. */
+function operatorPosyArray(acc) {
+  if (!acc) return [];
+  const arr = Array.isArray(acc.posys) ? acc.posys.map((x) => String(x)).filter(Boolean) : [];
+  if (arr.length > 0) return Array.from(new Set(arr));
+  return acc.posy ? [String(acc.posy)] : [];
+}
 function newOperatorId() {
   return "op-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
@@ -4700,7 +4721,7 @@ function PkmSelector({ onSelect }) {
             const m = valid[0];
             const role = "Operator Posyandu";
             writeLoginMeta({ pkm: m.pkm, user: m.acc.name || "Operator", role: role });
-            logActivity({ type: "login", pkm: m.pkm, user: m.acc.name || "Operator", role: role, detail: "Berhasil masuk" + (m.acc.posy ? " · Posyandu " + m.acc.posy : "") });
+            logActivity({ type: "login", pkm: m.pkm, user: m.acc.name || "Operator", role: role, detail: "Berhasil masuk" + (operatorPosyArray(m.acc).length ? " · Posyandu " + operatorPosyArray(m.acc).join(", ") : "") });
             setBusy(false);
             onSelect(m.pkm, m.acc.id);
             return;
@@ -8573,7 +8594,7 @@ function HelpdeskDinasView() {
 }
 
 /* ---------- Dashboard ---------- */
-function Dashboard({ records: recordsAll, today, posyList, posyFilter, setPosyFilter, setView, setSelectedId, isOperator, assignedPosy, slug, pkm, sasaranDesaVersion }) {
+function Dashboard({ records: recordsAll, today, posyList, posyFilter, setPosyFilter, setView, setSelectedId, isOperator, assignedPosy, operatorPosyOptions, slug, pkm, sasaranDesaVersion }) {
   const pf = usePeriodFilter(today, recordsAll);
 
   /* Kohort Usia Sasaran — berlaku untuk SELURUH dasbor ini: kartu ringkasan, grafik capaian per antigen,
@@ -8675,15 +8696,15 @@ function Dashboard({ records: recordsAll, today, posyList, posyFilter, setPosyFi
       </div>
 
       <PeriodFilterBar pf={pf} cohort={{ value: kohortDesa, onChange: setKohortDesa, counts: kohortCounts, total: kohortTotal }} trailing={<>
-        <select className="select" style={{ minWidth: 170 }} value={posyFilter} disabled={isOperator} onChange={(e) => setPosyFilter(e.target.value)}>
-          {!isOperator && <option value="Semua">Semua Posyandu</option>}
-          {(isOperator ? posyList.filter((p) => p === assignedPosy) : posyList).map((p) => (
+        <select className="select" style={{ minWidth: 170 }} value={posyFilter} disabled={isOperator && (operatorPosyOptions || []).length <= 1} onChange={(e) => setPosyFilter(e.target.value)}>
+          {(!isOperator || (operatorPosyOptions || []).length > 1) && <option value="Semua">{isOperator ? "Semua Posyandu Tugas Saya" : "Semua Posyandu"}</option>}
+          {(isOperator ? posyList.filter((p) => (operatorPosyOptions || [assignedPosy]).includes(p)) : posyList).map((p) => (
             <option key={p} value={p}>
               Posyandu {p}
             </option>
           ))}
         </select>
-        {isOperator && <span className="lock-note">🔒 Terkunci untuk Operator Posyandu {assignedPosy}</span>}
+        {isOperator && <span className="lock-note">🔒 Terkunci untuk Operator Posyandu {(operatorPosyOptions || [assignedPosy]).length > 1 ? operatorPosyOptions.join(", ") : assignedPosy}</span>}
       </>} />
       {kohortDesa !== "Semua" && (
         <div className="panel-note no-print" style={{ marginBottom: 14 }}>
@@ -8717,7 +8738,7 @@ function Dashboard({ records: recordsAll, today, posyList, posyFilter, setPosyFi
           <AntigenBreakdownModalPosyandu
             antigen={selectedAntigen}
             records={scope}
-            posyList={isOperator ? posyList.filter((p) => p === assignedPosy) : posyList}
+            posyList={isOperator ? posyList.filter((p) => (operatorPosyOptions || [assignedPosy]).includes(p)) : posyList}
             onClose={() => setSelectedAntigen(null)}
           />
         )}
@@ -8760,7 +8781,7 @@ function Dashboard({ records: recordsAll, today, posyList, posyFilter, setPosyFi
           <h2>Bayi per Posyandu</h2>
         </div>
         <div className="posy-grid">
-          {(isOperator ? posyList.filter((p) => p === assignedPosy) : posyList).map((p) => {
+          {(isOperator ? posyList.filter((p) => (operatorPosyOptions || [assignedPosy]).includes(p)) : posyList).map((p) => {
             const n = records.filter((r) => notDropout(r) && String(r.posy) === p).length;
             return (
               <button
@@ -8880,7 +8901,7 @@ function ListView({ filtered, today, posyList, posyFilter, setPosyFilter, search
       r._dropout ? `Dropout — ${(DROPOUT_REASONS.find((x) => x.kode === r._dropout) || {}).label || ""}` : "Aktif",
     ];
   });
-  const rosterScopeLabel = (locked ? operatorLock.posy : posyFilter === "Semua" ? "Semua Posyandu" : `Posyandu ${posyFilter}`) + (desaFilter !== "Semua" ? ` — ${desaFilter}` : "");
+  const rosterScopeLabel = (locked ? (operatorLock.posyOptions && operatorLock.posyOptions.length > 1 ? operatorLock.posyOptions.join(", ") : operatorLock.posy) : posyFilter === "Semua" ? "Semua Posyandu" : `Posyandu ${posyFilter}`) + (desaFilter !== "Semua" ? ` — ${desaFilter}` : "");
   const rosterFileBase = `data-sasaran-${slugifyPkm(pkm || "")}-${(locked ? operatorLock.posy : posyFilter) || "semua"}`;
 
   function exportCsv() {
@@ -8926,8 +8947,8 @@ function ListView({ filtered, today, posyList, posyFilter, setPosyFilter, search
       <div className="toolbar no-print">
         <input className="input" placeholder="Cari nama bayi…" value={search} onChange={(e) => setSearch(e.target.value)} />
         <select className="select" value={posyFilter} disabled title="Filter Posyandu hanya bisa diubah lewat kartu di Dashboard" onChange={(e) => setPosyFilter(e.target.value)}>
-          {!locked && <option value="Semua">Semua Posyandu</option>}
-          {(locked ? posyList.filter((p) => p === operatorLock.posy) : posyList).map((p) => (
+          {(!locked || (operatorLock.posyOptions || []).length > 1) && <option value="Semua">{locked ? "Semua Posyandu Tugas Saya" : "Semua Posyandu"}</option>}
+          {(locked ? posyList.filter((p) => (operatorLock.posyOptions && operatorLock.posyOptions.length ? operatorLock.posyOptions : [operatorLock.posy]).includes(p)) : posyList).map((p) => (
             <option key={p} value={p}>
               Posyandu {p}
             </option>
@@ -8943,7 +8964,7 @@ function ListView({ filtered, today, posyList, posyFilter, setPosyFilter, search
             ))}
           </select>
         )}
-        {locked && <span className="lock-note">🔒 Operator Posyandu {operatorLock.posy}</span>}
+        {locked && <span className="lock-note">🔒 Operator Posyandu {operatorLock.posyOptions && operatorLock.posyOptions.length > 1 ? operatorLock.posyOptions.join(", ") : operatorLock.posy}</span>}
         <select className="select" value={jkFilter} onChange={(e) => setJkFilter(e.target.value)}>
           <option value="Semua">Semua JK</option>
           <option value="L">Laki-laki</option>
@@ -9248,7 +9269,7 @@ function KendaliSasaranView({ filtered, today, posyList, posyFilter, setPosyFilt
           title={locked ? "Operator hanya bisa memilih Posyandu di desa binaannya" : "Pilih Posyandu"}
           onChange={(e) => setPosyFilter(e.target.value)}
         >
-          {!locked && <option value="Semua">Semua Posyandu</option>}
+          {(!locked || (operatorLock.posyOptions || []).length > 1) && <option value="Semua">{locked ? "Semua Posyandu Tugas Saya" : "Semua Posyandu"}</option>}
           {(locked ? (operatorLock.posyOptions && operatorLock.posyOptions.length ? operatorLock.posyOptions : [operatorLock.posy]) : posyList).map((p) => (
             <option key={p} value={p}>Posyandu {p}</option>
           ))}
@@ -9263,7 +9284,7 @@ function KendaliSasaranView({ filtered, today, posyList, posyFilter, setPosyFilt
         )}
         {locked && (
           <span className="lock-note">
-            🔒 Operator {operatorLock.desa ? `Desa ${operatorLock.desa}` : `Posyandu ${operatorLock.posy}`}
+            🔒 Operator {operatorLock.desa ? `Desa ${operatorLock.desa}` : `Posyandu ${operatorLock.posyOptions && operatorLock.posyOptions.length > 1 ? operatorLock.posyOptions.join(", ") : operatorLock.posy}`}
           </span>
         )}
         <select className="select" value={jkFilter} onChange={(e) => setJkFilter(e.target.value)}>
@@ -9527,10 +9548,42 @@ function AccessView({ role, assignedPosy, assignedDesa, posyList, desaList, onSa
 }
 
 /* ---------- Kelola Operator Posyandu (didaftarkan oleh Admin Puskesmas) ---------- */
+/* Pemilih beberapa Posyandu (kotak centang + pencarian + pilih semua/kosongkan). */
+function PosyMultiPicker({ posyList, value, onChange }) {
+  const [q, setQ] = useState("");
+  const sel = new Set(value);
+  const shown = posyList.filter((p) => String(p).toLowerCase().includes(q.trim().toLowerCase()));
+  const toggle = (p) => {
+    const n = new Set(value);
+    if (n.has(p)) n.delete(p); else n.add(p);
+    onChange(posyList.filter((x) => n.has(x)).concat(value.filter((x) => !posyList.includes(x) && n.has(x))));
+  };
+  if (posyList.length === 0) return <div className="panel-note">— Belum ada data posyandu —</div>;
+  return (
+    <div style={{ border: "1px solid var(--line)", borderRadius: 9, padding: 10, background: "#fff", minWidth: 260 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+        <input className="input" style={{ maxWidth: 200 }} placeholder="Cari posyandu…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <button type="button" className="btn-secondary edit-inline-btn" onClick={() => onChange(Array.from(new Set([...value, ...shown])))}>Pilih semua{q ? " hasil" : ""}</button>
+        <button type="button" className="btn-secondary edit-inline-btn" onClick={() => onChange([])}>Kosongkan</button>
+        <b style={{ fontSize: 12 }}>{value.length} dipilih</b>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 180, overflowY: "auto" }}>
+        {shown.map((p) => (
+          <label key={p} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, padding: "4px 9px", borderRadius: 8, border: "1px solid var(--line)", cursor: "pointer", background: sel.has(p) ? "#FBE3EC" : "#FFF9FB" }}>
+            <input type="checkbox" checked={sel.has(p)} onChange={() => toggle(p)} />
+            Posyandu {p}
+          </label>
+        ))}
+        {shown.length === 0 && <span className="panel-note">Tidak ada posyandu cocok.</span>}
+      </div>
+    </div>
+  );
+}
+
 function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
   const [list, setList] = useState(null);
   const [name, setName] = useState("");
-  const [posy, setPosy] = useState(posyList[0] || "");
+  const [posys, setPosys] = useState([]);
   const [desa, setDesa] = useState("Semua");
   const [pwd, setPwd] = useState(defaultOperatorPassword());
   const [error, setError] = useState("");
@@ -9539,7 +9592,7 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [resetId, setResetId] = useState(null);
   const [editingId, setEditingId] = useState(null);
-  const [editPosy, setEditPosy] = useState("");
+  const [editPosys, setEditPosys] = useState([]);
   const [editDesa, setEditDesa] = useState("Semua");
 
   useEffect(() => {
@@ -9547,10 +9600,6 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
       setList(await loadOperatorAccounts(slug));
     })();
   }, [slug]);
-
-  useEffect(() => {
-    if (!posy && posyList.length > 0) setPosy(posyList[0]);
-  }, [posyList]);
 
   function flash(msg) {
     setToast(msg);
@@ -9575,8 +9624,8 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
         return;
       }
     }
-    if (!posy) {
-      setError("Pilih Posyandu yang ditugaskan.");
+    if (posys.length === 0) {
+      setError("Pilih minimal 1 Posyandu yang ditugaskan.");
       return;
     }
     if (!pwd || pwd.length < 4) {
@@ -9587,7 +9636,8 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
     const rec = {
       id: newOperatorId(),
       name: name.trim(),
-      posy,
+      posy: posys[0],
+      posys: [...posys],
       desa: desa === "Semua" ? "" : desa,
       password: pwd,
       createdAt: new Date().toISOString(),
@@ -9596,9 +9646,10 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
     const saved = await saveOperatorAccounts(slug, next);
     setBusy(false);
     if (saved) {
-      logActivity({ type: "aksi", detail: "Daftarkan akun Operator " + rec.name + " · Posyandu " + rec.posy + " (" + slug + ")" });
+      logActivity({ type: "aksi", detail: "Daftarkan akun Operator " + rec.name + " · Posyandu " + rec.posys.join(", ") + " (" + slug + ")" });
       setList(next);
       setName("");
+      setPosys([]);
       setPwd(defaultOperatorPassword());
       setDesa("Semua");
       flash("Akun Operator berhasil didaftarkan");
@@ -9631,13 +9682,14 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
 
   function startEdit(o) {
     setEditingId(o.id);
-    setEditPosy(o.posy);
+    setEditPosys(operatorPosyArray(o));
     setEditDesa(o.desa || "Semua");
   }
 
   async function saveEdit(id) {
+    if (editPosys.length === 0) { flash("Pilih minimal 1 Posyandu"); return; }
     const next = (list || []).map((o) =>
-      o.id === id ? { ...o, posy: editPosy, desa: editDesa === "Semua" ? "" : editDesa } : o
+      o.id === id ? { ...o, posy: editPosys[0], posys: [...editPosys], desa: editDesa === "Semua" ? "" : editDesa } : o
     );
     const saved = await saveOperatorAccounts(slug, next);
     if (saved) {
@@ -9664,7 +9716,7 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
         <div className="panel-head">
           <h2>Daftarkan Akun Operator Baru</h2>
           <span className="panel-note">
-            Setiap akun Operator terkunci ke satu Posyandu (dan opsional Desa/Kelurahan) sehingga petugas hanya
+            Setiap akun Operator terkunci ke satu atau beberapa Posyandu (sesuai wilayah tugas bidan; dan opsional Desa/Kelurahan) sehingga petugas hanya
             bisa melihat/menginput data posyandu yang ditugaskan. Operator masuk tanpa memilih Puskesmas: cukup mengetik
             nama operator ini sebagai username (huruf besar/kecil dan spasi diabaikan) beserta kata sandi di bawah. Bila nama yang sama
             ada di Puskesmas lain, operator menulis "nama@kode-Puskesmas Anda".
@@ -9680,17 +9732,10 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
               onChange={(e) => setName(e.target.value)}
             />
           </label>
-          <label className="field">
-            <span>Posyandu yang ditugaskan</span>
-            <select className="select" value={posy} onChange={(e) => setPosy(e.target.value)}>
-              {posyList.length === 0 && <option value="">— Belum ada data posyandu —</option>}
-              {posyList.map((pp) => (
-                <option key={pp} value={pp}>
-                  Posyandu {pp}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="field" style={{ gridColumn: "1 / -1" }}>
+            <span>Posyandu yang ditugaskan (boleh lebih dari satu)</span>
+            <PosyMultiPicker posyList={posyList} value={posys} onChange={setPosys} />
+          </div>
           {desaList.length > 0 && (
             <label className="field">
               <span>Desa/Kelurahan (opsional)</span>
@@ -9710,7 +9755,7 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
           </label>
         </div>
         {error && <div className="panel-note" style={{ color: "var(--danger)", marginTop: 8 }}>{error}</div>}
-        <button className="btn-primary" style={{ marginTop: 12 }} disabled={busy || !posy} onClick={addOperator}>
+        <button className="btn-primary" style={{ marginTop: 12 }} disabled={busy || posys.length === 0} onClick={addOperator}>
           {busy ? "Menyimpan…" : "+ Daftarkan Operator"}
         </button>
       </div>
@@ -9742,15 +9787,9 @@ function OperatorAccountsView({ slug, pkm, posyList, desaList, onCancel }) {
                     <td>{o.name}</td>
                     <td>
                       {editingId === o.id ? (
-                        <select className="select" value={editPosy} onChange={(e) => setEditPosy(e.target.value)}>
-                          {posyList.map((pp) => (
-                            <option key={pp} value={pp}>
-                              {pp}
-                            </option>
-                          ))}
-                        </select>
+                        <PosyMultiPicker posyList={posyList} value={editPosys} onChange={setEditPosys} />
                       ) : (
-                        o.posy
+                        operatorPosyArray(o).join(", ")
                       )}
                     </td>
                     <td>
@@ -10614,12 +10653,12 @@ function GenericSasaranListView({ catDef, records: recordsRaw, pkm, onSave, onDe
         <div className="filter-row" style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
           <input className="input" style={{ maxWidth: 260 }} placeholder={`Cari nama ${catDef.labelSatuan}...`} value={search} onChange={(e) => setSearch(e.target.value)} />
           <select className="select" style={{ maxWidth: 220 }} value={posyFilter} disabled={locked && lockOptions.length <= 1} onChange={(e) => setPosyFilter(e.target.value)}>
-            {!locked && <option value="Semua">Semua Posyandu</option>}
+            {(!locked || lockOptions.length > 1) && <option value="Semua">Semua Posyandu</option>}
             {posyList.map((p) => (
               <option key={p} value={p}>{p}</option>
             ))}
           </select>
-          {locked && <span className="lock-note">🔒 Terkunci untuk Operator Posyandu {lockPosy}</span>}
+          {locked && <span className="lock-note">🔒 Terkunci untuk Operator Posyandu {lockOptions.length > 1 ? lockOptions.join(", ") : lockPosy}</span>}
         </div>
         <div className="table-wrap">
           <table className="table small">
