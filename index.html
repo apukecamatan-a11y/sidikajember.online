@@ -4166,6 +4166,7 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
             ["dashboard", "Dasbor Cakupan"],
             ["list", "Data Basis Sasaran"],
             ["kendali-sasaran", "Tabel Kendali Sasaran"],
+            ["sasaran-posyandu", "Data Sasaran Posyandu"],
             ["wus-list", "Data WUS"],
             ["bumil-list", "Data Ibu Hamil"],
             ["sasaran-desa", "Sasaran per Desa"],
@@ -4303,6 +4304,17 @@ function AppInner({ pkm, operatorId, onChangePkm, dinasSwitchActive, onReturnToD
         )}
         {view === "sasaran-desa" && (
           <SasaranDesaPkmView pkm={pkm} slug={slug} />
+        )}
+        {view === "sasaran-posyandu" && (
+          <SasaranPosyanduView
+            records={scopeOperator(basisRecords)}
+            posyList={posyList}
+            setPosyFilter={setPosyFilter}
+            setView={setView}
+            isOperator={isOperator}
+            operatorPosyOptions={operatorPosyOptions}
+            assignedPosy={assignedPosy}
+          />
         )}
         {view === "reminders" && (
           <RemindersView
@@ -5947,6 +5959,8 @@ function DinasView({ onBack, onSwitchAccount }) {
           <SwitchableCoverageChart data={chartData} onBarClick={(d) => setSelectedAntigen(d)} defaultType="bar" title="Capaian per Jenis Imunisasi" fileName="grafik-capaian-per-antigen" />
           <AchievementScaleLegend />
         </div>
+
+        <KejarCoveragePanel records={pfScope} today={today} level="dinas" />
 
         {selectedAntigen && (
           <AntigenBreakdownModal antigen={selectedAntigen} records={pfScope} onClose={() => setSelectedAntigen(null)} />
@@ -8776,13 +8790,258 @@ function Dashboard({ records: recordsAll, today, posyList, posyFilter, setPosyFi
         </div>
       </div>
 
+      <KejarCoveragePanel records={records} today={today} level={isOperator ? "operator" : "puskesmas"} />
+    </div>
+  );
+}
+
+/* ---------- Grafik Cakupan Kejar (mengikuti definisi KEJAR_META / computeKejarInfo / computeKejarDoneInfo) ---------- */
+/* Sisi data tiap kategori:
+   - belum = dosis yang MASIH perlu dikejar (item.kejar.category)
+   - sudah = dosis yang SUDAH diberikan di luar batas tepat waktu (item.kejarDone.category)
+   rutin & murni punya kedua sisi (bisa dihitung % cakupan); zerodose & terkunci hanya "belum"; terlambat hanya "sudah". */
+const KEJAR_CHART_CATS = [
+  { key: "rutin", belum: true, sudah: true, desc: "Antigen dasar belum diberikan pada usia 0–11 bln 29 hr, atau antigen lanjutan (booster) pada usia >12–23 bln 29 hr." },
+  { key: "murni", belum: true, sudah: true, desc: "Antigen dasar belum lengkap pada sasaran usia 12–23 bln 29 hr." },
+  { key: "zerodose", belum: true, sudah: false, desc: "DPT/Polio/MR/PCV belum diberikan pada sasaran ≥ 2 tahun yang masih boleh dikejar hingga usia 59 bln 5 hr." },
+  { key: "terkunci", belum: true, sudah: false, desc: "Antigen belum diberikan dan sudah melewati batas usia kejar, sehingga terkunci." },
+  { key: "terlambat", belum: false, sudah: true, desc: "Antigen sudah diberikan tetapi melewati batas tepat waktu (jadwal + 30 hari) atau pada usia ≥ 2 tahun." },
+];
+
+function KejarBars({ rows, cat, onPick, emptyText }) {
+  const max = Math.max(1, ...rows.map((c) => c.sudah + c.belum));
+  const two = cat.belum && cat.sudah;
+  const meta = KEJAR_META[cat.key];
+  if (!rows.length) return <div className="panel-note">{emptyText || "Belum ada data pada cakupan ini."}</div>;
+  return (
+    <div className="kj-list">
+      {rows.map((c) => {
+        const t = c.sudah + c.belum;
+        const pct = t ? Math.round((c.sudah / t) * 100) : 0;
+        const tip = two ? `${c.label}: ${c.sudah} sudah dikejar, ${c.belum} belum dikejar (${pct}%)` : `${c.label}: ${t} dosis`;
+        return (
+          <div className={"kj-row" + (onPick ? " kj-pick" : "")} key={c.key || c.label} title={tip} onClick={onPick ? () => onPick(c) : undefined}>
+            <span className="kj-name">{c.label}</span>
+            <span className="kj-track">
+              {c.sudah > 0 && <span className="kj-seg" style={{ width: (c.sudah / max) * 100 + "%", background: two ? "var(--mint)" : meta.color }} />}
+              {c.belum > 0 && <span className="kj-seg" style={{ width: (c.belum / max) * 100 + "%", background: meta.color }} />}
+            </span>
+            <span className="kj-num">{two ? <>{fmtNum(c.sudah)}/{fmtNum(t)} · <b>{pct}%</b></> : <b>{fmtNum(t)}</b>}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const KEJAR_TREND_MONTHS = 12;
+const KEJAR_BULAN = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+
+/* Grafik garis SVG: series = [{ key, label, color, values: number[] }], labels = nama bulan */
+function KejarLineChart({ labels, series }) {
+  const W = 640, H = 240, L = 38, R = 14, T = 14, B = 30;
+  const n = labels.length;
+  const max = Math.max(1, ...series.flatMap((s) => s.values));
+  const niceMax = (() => { const p = Math.pow(10, Math.floor(Math.log10(max))); const m = max / p; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p; })();
+  const x = (i) => L + (n <= 1 ? (W - L - R) / 2 : (i * (W - L - R)) / (n - 1));
+  const y = (v) => T + (1 - v / niceMax) * (H - T - B);
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(niceMax * f * 100) / 100);
+  return (
+    <svg className="kj-line" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Grafik garis tren imunisasi kejar per bulan">
+      {ticks.map((t) => (
+        <g key={t}>
+          <line x1={L} x2={W - R} y1={y(t)} y2={y(t)} stroke="var(--line)" />
+          <text x={L - 6} y={y(t) + 4} textAnchor="end" fontSize="10" fill="var(--ink-soft)">{fmtNum(Math.round(t))}</text>
+        </g>
+      ))}
+      {labels.map((lb, i) => (
+        <text key={i} x={x(i)} y={H - 10} textAnchor="middle" fontSize="10" fill="var(--ink-soft)">{lb}</text>
+      ))}
+      {series.map((s) => (
+        <g key={s.key}>
+          <polyline fill="none" stroke={s.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" points={s.values.map((v, i) => `${x(i)},${y(v)}`).join(" ")} />
+          {s.values.map((v, i) => (
+            <circle key={i} cx={x(i)} cy={y(v)} r="3.5" fill="#fff" stroke={s.color} strokeWidth="2">
+              <title>{`${s.label} — ${labels[i]}: ${fmtNum(v)} dosis`}</title>
+            </circle>
+          ))}
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function KejarCoveragePanel({ records, today, level }) {
+  // level: "dinas" (per Puskesmas), "puskesmas" (per Desa / Posyandu), "operator" (per Posyandu)
+  const [katKey, setKatKey] = useState("rutin");
+  const [trendKum, setTrendKum] = useState(false);
+  const [trendOff, setTrendOff] = useState({});
+  const defaultDim = level === "dinas" ? "pkm" : level === "operator" ? "posy" : "desa";
+  const [dimState, setDim] = useState(defaultDim);
+  const dimOptions = level === "dinas" ? [["pkm", "Per Puskesmas"]] : level === "operator" ? [["posy", "Per Posyandu"]] : [["desa", "Per Desa/Kelurahan"], ["posy", "Per Posyandu"]];
+  const dim = dimOptions.some((o) => o[0] === dimState) ? dimState : defaultDim;
+  const cat = KEJAR_CHART_CATS.find((c) => c.key === katKey) || KEJAR_CHART_CATS[0];
+  const meta = KEJAR_META[cat.key];
+  const two = cat.belum && cat.sudah;
+
+  const data = useMemo(() => {
+    const out = {};
+    KEJAR_CHART_CATS.forEach((c) => {
+      const ant = {};
+      SCHEDULE.forEach((sc) => { ant[sc.key] = { key: sc.key, label: sc.label, sudah: 0, belum: 0 }; });
+      out[c.key] = { sudah: 0, belum: 0, bayi: 0, ant, per: { pkm: {}, desa: {}, posy: {} } };
+    });
+    const monthIdx = (d) => (d.getFullYear() - today.getFullYear()) * 12 + (d.getMonth() - today.getMonth()) + (KEJAR_TREND_MONTHS - 1);
+    out.trend = {};
+    KEJAR_CHART_CATS.filter((c) => c.sudah).forEach((c) => { out.trend[c.key] = new Array(KEJAR_TREND_MONTHS).fill(0); });
+    (records || []).filter(notDropout).forEach((r) => {
+      const st = recordStatuses(r, today);
+      const wil = {
+        pkm: r._pkm || "(tanpa puskesmas)",
+        desa: r.desa || "(tanpa desa)",
+        posy: r.posy ? "Posyandu " + r.posy : "(tanpa posyandu)",
+      };
+      const seen = {};
+      SCHEDULE.forEach((sc) => {
+        const it = st[sc.key];
+        if (!it) return;
+        [["belum", it.kejar], ["sudah", it.kejarDone]].forEach(([side, info]) => {
+          if (!info || !out[info.category]) return;
+          const c = KEJAR_CHART_CATS.find((x) => x.key === info.category);
+          if (!c[side]) return;
+          const o = out[info.category];
+          if (side === "sudah" && it.given && it.given <= today) {
+            const mi = monthIdx(it.given);
+            if (mi >= 0 && mi < KEJAR_TREND_MONTHS) out.trend[info.category][mi]++;
+          }
+          o[side]++;
+          o.ant[sc.key][side]++;
+          ["pkm", "desa", "posy"].forEach((d) => {
+            const cell = (o.per[d][wil[d]] = o.per[d][wil[d]] || { label: wil[d], sudah: 0, belum: 0 });
+            cell[side]++;
+          });
+          if (!seen[info.category]) { seen[info.category] = true; o.bayi++; }
+        });
+      });
+    });
+    return out;
+  }, [records, today]);
+
+  const cur = data[cat.key];
+  const pctOf = (c) => { const t = c.sudah + c.belum; return t ? Math.round((c.sudah / t) * 100) : 0; };
+  const overviewRows = KEJAR_CHART_CATS.map((c) => ({ key: c.key, label: KEJAR_META[c.key].label, sudah: data[c.key].sudah, belum: data[c.key].belum, cat: c }));
+  const antRows = SCHEDULE.map((sc) => cur.ant[sc.key]).filter((c) => c.sudah + c.belum > 0);
+  const wilRows = Object.values(cur.per[dim])
+    .sort((a, b) => (b.sudah + b.belum) - (a.sudah + a.belum) || a.label.localeCompare(b.label, "id", { numeric: true }));
+  const trendLabels = Array.from({ length: KEJAR_TREND_MONTHS }, (_, i) => {
+    const d = new Date(today.getFullYear(), today.getMonth() - (KEJAR_TREND_MONTHS - 1 - i), 1);
+    return KEJAR_BULAN[d.getMonth()] + (d.getMonth() === 0 || i === 0 ? " " + String(d.getFullYear()).slice(2) : "");
+  });
+  const trendSeries = KEJAR_CHART_CATS.filter((c) => c.sudah && !trendOff[c.key]).map((c) => {
+    let acc = 0;
+    const raw = data.trend[c.key];
+    return { key: c.key, label: KEJAR_META[c.key].label, color: KEJAR_META[c.key].color, values: trendKum ? raw.map((v) => (acc += v)) : raw };
+  });
+  const scopeNote = level === "dinas" ? "seluruh puskesmas se-Kabupaten Jember" : level === "operator" ? "posyandu yang menjadi tanggung jawab Anda" : "wilayah kerja puskesmas ini";
+  const empty = `Belum ada data ${meta.label.toLowerCase()} pada cakupan ini.`;
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>Cakupan Imunisasi Kejar</h2>
+        <div className="chart-mode-toggle no-print kj-tabs">
+          {KEJAR_CHART_CATS.map((c) => (
+            <button key={c.key} className={katKey === c.key ? "active" : ""} onClick={() => setKatKey(c.key)}>{KEJAR_META[c.key].label}</button>
+          ))}
+        </div>
+      </div>
+      <div className="panel-note" style={{ marginBottom: 12 }}>
+        Data: {scopeNote}, status jadwal per {fmtDate(today)}. Cakupan Kejar Rutin &amp; Murni = dosis sudah dikejar ÷ (sudah dikejar + masih perlu dikejar).
+      </div>
+
+      <div className="stat-grid">
+        {["rutin", "murni"].map((k) => {
+          const c = data[k];
+          return (
+            <StatCard key={k} label={`Cakupan ${KEJAR_META[k].label}`} value={c.sudah + c.belum ? `${pctOf(c)}%` : "-"} sub={`${fmtNum(c.sudah)} dosis sudah dikejar · ${fmtNum(c.belum)} belum · ${fmtNum(c.bayi)} bayi`} accent={KEJAR_META[k].color} />
+          );
+        })}
+        <StatCard label="Zero Dose Perlu Dikejar" value={fmtNum(data.zerodose.belum)} sub={`dosis · ${fmtNum(data.zerodose.bayi)} bayi/balita`} accent={KEJAR_META.zerodose.color} />
+        <StatCard label="Antigen Terkunci" value={fmtNum(data.terkunci.belum)} sub={`dosis · ${fmtNum(data.terkunci.bayi)} bayi/balita`} accent={KEJAR_META.terkunci.color} />
+      </div>
+
+      <h3 className="kj-title">Ringkasan Seluruh Kategori Kejar <span className="panel-note">(klik batang untuk melihat rincian)</span></h3>
+      <KejarBars rows={overviewRows} cat={{ key: cat.key, belum: false, sudah: false }} onPick={(c) => setKatKey(c.key)} />
+      <div className="panel-note" style={{ margin: "6px 0 14px" }}>Jumlah dosis, tiap kategori memakai warna definisinya.</div>
+
+      <div className="kj-trend">
+        <div className="kj-title-row">
+          <h3 className="kj-title">Tren Dosis Kejar yang Diberikan — {KEJAR_TREND_MONTHS} Bulan Terakhir</h3>
+          <div className="chart-mode-toggle no-print">
+            <button className={!trendKum ? "active" : ""} onClick={() => setTrendKum(false)}>Per Bulan</button>
+            <button className={trendKum ? "active" : ""} onClick={() => setTrendKum(true)}>Kumulatif</button>
+          </div>
+        </div>
+        <div className="kj-legend no-print">
+          {KEJAR_CHART_CATS.filter((c) => c.sudah).map((c) => (
+            <button key={c.key} className={"kj-chip" + (trendOff[c.key] ? " off" : "")} onClick={() => setTrendOff((o) => ({ ...o, [c.key]: !o[c.key] }))}>
+              <i className="kj-dot" style={{ background: KEJAR_META[c.key].color }} />{KEJAR_META[c.key].label}
+            </button>
+          ))}
+        </div>
+        {trendSeries.length ? <KejarLineChart labels={trendLabels} series={trendSeries} /> : <div className="panel-note">Pilih minimal satu kategori.</div>}
+        <div className="panel-note">Dihitung dari tanggal pemberian dosis (hanya dosis yang diberikan melewati batas tepat waktu). Dosis yang diberikan lebih dari {KEJAR_TREND_MONTHS} bulan lalu tidak ditampilkan.</div>
+      </div>
+
+      <div className="kj-detail-head" style={{ borderColor: meta.color, background: meta.bg }}>
+        <b style={{ color: meta.color }}>{meta.label}</b> — {cat.desc}
+        <div className="kj-legend">
+          {two && <span><i className="kj-dot" style={{ background: "var(--mint)" }} /> Sudah dikejar</span>}
+          <span><i className="kj-dot" style={{ background: meta.color }} /> {cat.sudah && !cat.belum ? "Sudah diberikan (terlambat)" : "Belum dikejar"}</span>
+          <span>{fmtNum(cur.bayi)} bayi/balita</span>
+        </div>
+      </div>
+      <div className="kj-cols">
+        <div>
+          <h3 className="kj-title">{meta.label} per Antigen</h3>
+          <KejarBars rows={antRows} cat={cat} emptyText={empty} />
+        </div>
+        <div>
+          <div className="kj-title-row">
+            <h3 className="kj-title">{meta.label} {dimOptions.find((o) => o[0] === dim)[1].toLowerCase()}</h3>
+            {dimOptions.length > 1 && (
+              <div className="chart-mode-toggle no-print">
+                {dimOptions.map(([k, l]) => (<button key={k} className={dim === k ? "active" : ""} onClick={() => setDim(k)}>{l}</button>))}
+              </div>
+            )}
+          </div>
+          <div className="kj-scroll"><KejarBars rows={wilRows} cat={cat} emptyText={empty} /></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Data Sasaran Posyandu ---------- */
+function SasaranPosyanduView({ records, posyList, setPosyFilter, setView, isOperator, operatorPosyOptions, assignedPosy }) {
+  const list = isOperator ? posyList.filter((p) => (operatorPosyOptions || [assignedPosy]).includes(p)) : posyList;
+  const total = (records || []).filter(notDropout).length;
+  return (
+    <div className="dashboard">
+      <div className="page-head">
+        <div>
+          <div className="eyebrow">Basis Sasaran</div>
+          <h1>Data Sasaran Posyandu</h1>
+        </div>
+      </div>
       <div className="panel">
         <div className="panel-head">
           <h2>Bayi per Posyandu</h2>
+          <span className="panel-note">{total} bayi di {list.length} posyandu · klik kartu untuk membuka daftar bayinya</span>
         </div>
         <div className="posy-grid">
-          {(isOperator ? posyList.filter((p) => (operatorPosyOptions || [assignedPosy]).includes(p)) : posyList).map((p) => {
-            const n = records.filter((r) => notDropout(r) && String(r.posy) === p).length;
+          {list.map((p) => {
+            const n = (records || []).filter((r) => notDropout(r) && String(r.posy) === p).length;
             return (
               <button
                 key={p}
@@ -14730,6 +14989,29 @@ h2 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 17px; margin: 
 .legend-row { font-size: 12px; color: var(--ink-soft); margin-top: 8px; }
 .legend-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 
+.kj-trend { margin: 4px 0 18px; }
+.kj-line { width: 100%; height: auto; max-height: 280px; display: block; }
+.kj-chip { display: inline-flex; align-items: center; border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; color: var(--ink); }
+.kj-chip.off { opacity: .45; text-decoration: line-through; }
+.kj-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 8px; }
+.kj-title { font-size: 14px; margin: 0 0 10px; color: var(--primary-dark); }
+.kj-title-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.kj-title-row .kj-title { margin: 0; }
+.kj-legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--ink-soft); margin: 4px 0 8px; }
+.kj-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; }
+.kj-list { display: flex; flex-direction: column; gap: 7px; }
+.kj-row { display: grid; grid-template-columns: 120px 1fr 110px; align-items: center; gap: 10px; font-size: 12px; }
+.kj-name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kj-track { display: flex; height: 14px; background: var(--primary-soft); border-radius: 7px; overflow: hidden; }
+.kj-seg { height: 100%; transition: width .3s; }
+.kj-pick { cursor: pointer; }
+.kj-pick:hover .kj-name { color: var(--primary); text-decoration: underline; }
+.kj-detail-head { border-left: 4px solid; border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px; }
+.kj-tabs { flex-wrap: wrap; }
+.kj-num { text-align: right; color: var(--ink-soft); white-space: nowrap; }
+.kj-scroll { max-height: 420px; overflow-y: auto; padding-right: 4px; }
+@media (max-width: 900px) { .kj-cols { grid-template-columns: 1fr; } .kj-row { grid-template-columns: 90px 1fr 90px; } }
+@media print { .kj-scroll { max-height: none; overflow: visible; } }
 .posy-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
 .posy-chip { border: 1px solid var(--line); background: #FFF9FB; border-radius: 9px; padding: 10px; cursor: pointer; text-align: left; }
 .posy-chip:hover { border-color: var(--primary); }
